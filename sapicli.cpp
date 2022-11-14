@@ -259,8 +259,11 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, int rate, int vo
 		return 1;
 	}
 
+	WCHAR fullVoiceId[MAX_PATH];
+	_snwprintf_s(fullVoiceId, MAX_PATH, _TRUNCATE, L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\%s", voiceId);
+
 	CComPtr<ISpObjectToken> voiceToken;
-	hr = SpGetTokenFromId(voiceId, &voiceToken);
+	hr = SpGetTokenFromId(fullVoiceId, &voiceToken);
 	if (FAILED(hr)) {
 		fwprintf(stderr, L"Could not get token for voice \"%s\": %d %s\n", voiceId, hr, getErrorString(hr));
 		return 1;
