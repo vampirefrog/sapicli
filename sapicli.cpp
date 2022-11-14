@@ -1,5 +1,6 @@
 #include <windows.h>        // System includes
 #include <atlbase.h>		// ATL
+#include <atlcom.h>
 #include <windowsx.h>
 #include <wchar.h>
 #include <tchar.h>
@@ -7,7 +8,9 @@
 #pragma warning(push)       // Disable warning C4996: 'GetVersionExA': was declared deprecated (sphelper.h:1319)
 #pragma warning(disable: 4996)
 #include <sphelper.h>
+#include <spddkhlp.h>
 #pragma warning(pop)
+#include <initguid.h>
 #include <io.h>
 #include <fcntl.h>
 
@@ -26,9 +29,9 @@ void printJsonString(const WCHAR* in) {
 		return;
 	}
 
-	int l = wcslen(in);
+	size_t l = wcslen(in);
 	fputwc(L'"', stdout);
-	for(int i = 0; i < l; i++) {
+	for(size_t i = 0; i < l; i++) {
 		if(in[i] == L'"')
 			fputwc(L'\\', stdout);
 		else if(in[i] == L'\\')
@@ -36,7 +39,7 @@ void printJsonString(const WCHAR* in) {
 		fputwc(in[i], stdout);
 	}
 	fputwc(L'"', stdout);
-}
+} 
 
 void printJsonKeyPair(const WCHAR* key, const WCHAR* value, int skipComma = 0) {
 	printJsonString(key);
@@ -191,6 +194,56 @@ int addLexemes() {
 	return 0;
 }
 
+class PooSpStream: public ISpStreamFormat, public ISpEventSink {
+public:
+	CComPtr<ISpEventSink> sink;
+	HANDLE h;
+	PooSpStream() {
+		h = GetStdHandle(STD_OUTPUT_HANDLE);
+	}
+
+	STDMETHODIMP QueryInterface(REFIID riid, void** ppv) {
+		if (ppv == NULL) return E_INVALIDARG;
+		*ppv = NULL;
+		if (riid == IID_IUnknown || riid == IID_ISequentialStream || riid == IID_IStream || riid == IID_ISpStreamFormat)
+			*ppv = static_cast<ISpStreamFormat*>(this);
+		else if (riid == IID_ISpEventSink)
+			*ppv = static_cast<ISpEventSink*>(this);
+		else return E_NOINTERFACE;
+		return S_OK;
+	}
+	STDMETHODIMP_(ULONG) AddRef(void) { return 1; }
+	STDMETHODIMP_(ULONG) Release(void) { return 1; }
+	HRESULT STDMETHODCALLTYPE Read(void*, ULONG, ULONG*) { wprintf(L"Read\n"); return 0; }
+	HRESULT STDMETHODCALLTYPE Write(const void* buf, ULONG size, ULONG* newPos) {
+		WriteFile(h, buf, size, newPos, NULL);
+		return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE Seek(LARGE_INTEGER dlibMove, DWORD dwOrigin, ULARGE_INTEGER* plibNewPosition) {
+		if(plibNewPosition)
+			plibNewPosition->QuadPart = dlibMove.QuadPart;
+		return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE SetSize(ULARGE_INTEGER) { return 0; }
+	HRESULT STDMETHODCALLTYPE CopyTo(IStream*, ULARGE_INTEGER, ULARGE_INTEGER*, ULARGE_INTEGER*) { return 0; }
+	HRESULT STDMETHODCALLTYPE Commit(DWORD) { return 0; }
+	HRESULT STDMETHODCALLTYPE Revert(void) { return 0; }
+	HRESULT STDMETHODCALLTYPE LockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) { return 0; }
+	HRESULT STDMETHODCALLTYPE UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) { return 0; }
+	HRESULT STDMETHODCALLTYPE Stat(STATSTG*, DWORD) { return 0; }
+	HRESULT STDMETHODCALLTYPE Clone(IStream**) { return 0; }
+	HRESULT STDMETHODCALLTYPE GetFormat(GUID* pguidFormatId, WAVEFORMATEX**format) {
+		return SpConvertStreamFormatEnum(SPSF_16kHz16BitMono, pguidFormatId, format);
+	}
+	HRESULT STDMETHODCALLTYPE AddEvents(const SPEVENT* pEventArray, ULONG ulCount) {
+		return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE GetEventInterest(ULONGLONG* pullEventInterest) {
+		*pullEventInterest = 0xFFFFFFFF;
+		return S_OK;
+	}
+};
+
 int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, int rate, int volume, DWORD speakFlags, ULONGLONG ullEventInterest) {
 	HRESULT hr;
 
@@ -206,42 +259,21 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, int rate, int vo
 
 	CComPtr<ISpObjectToken> voiceToken;
 	hr = SpGetTokenFromId(voiceId, &voiceToken);
-	if(FAILED(hr)) {
+	if (FAILED(hr)) {
 		fwprintf(stderr, L"Could not get token for voice \"%s\": %d %s\n", voiceId, hr, getErrorString(hr));
 		return 1;
 	}
 
 	hr = voice->SetVoice(voiceToken);
-	if(FAILED(hr)) {
+	if (FAILED(hr)) {
 		fwprintf(stderr, L"Could not set voice: %d %s\n", hr, getErrorString(hr));
 		return 1;
 	}
 
-	CComPtr<ISpStreamFormat> outputStreamFormat;
-	hr = voice->GetOutputStream(&outputStreamFormat);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not get output stream: %d %s\n", hr, getErrorString(hr));
-		return 1;
-	}
-
-	CSpStreamFormat streamFormat;
-	hr = streamFormat.AssignFormat(outputStreamFormat);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not assign format: %d %s\n", hr, getErrorString(hr));
-		return 1;
-	}
-
-	// User SAPI helper function in sphelper.h to create a wav file
-	CComPtr<ISpStream> cpWavStream;
-	hr = SPBindToFile(wavFilename, SPFM_CREATE_ALWAYS, &cpWavStream, &streamFormat.FormatId(), streamFormat.WaveFormatExPtr(), ullEventInterest);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not bind to file \"%s\": %d %s\n", wavFilename, hr, getErrorString(hr));
-		return 1;
-	}
-
-	hr = voice->SetOutput(cpWavStream, TRUE);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not set output to wav file \"%s\": %d %s\n", wavFilename, hr, getErrorString(hr));
+	PooSpStream poo;
+	hr = voice->SetOutput(static_cast<IUnknown*>(static_cast<ISpStreamFormat*>(&poo)), FALSE);
+	if (FAILED(hr)) {
+		fwprintf(stderr, L"Could not set output: %d %s\n", hr, getErrorString(hr));
 		return 1;
 	}
 
@@ -262,7 +294,6 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, int rate, int vo
 		fwprintf(stderr, L"Could not speak: %d %s\n", hr, getErrorString(hr));
 		return 1;
 	}
-	cpWavStream.Release();
 
 	voiceToken.Release();
 
@@ -381,23 +412,23 @@ int wmain(int argc, WCHAR* argv[]) {
 		fwprintf(
 			stderr,
 			L"Usage: %s --list | [options] <text>\n"
-			"  -h, --help                      Print this help.\n"
-			"  -l, --list                      List all voices.\n"
-			"  -o, --output=FILE               Output WAV file.\n"
-			"  -v, --voice=VOICE               Select voice.\n"
-			"  -t, --type=TYPE                 Input text type (PLAIN,SSML,SAPI,AUTO).\n"
-			"  -r, --rate=RATE                 Rate (speed) of speech, from -10 to 10.\n"
-			"  -V, --volume=VOL                Volume of speech, from 0 to 100.\n"
-			"  -a, --all-events                Log all events in the EVNT RIFF chunk.\n"
-			"  -S, --start-input-stream-event  Log start input stream events.\n"
-			"  -E, --end-input-stream-event    Log end input stream events.\n"
-			"  -C, --voice-change-event        Log voice change events.\n"
-			"  -B, --bookmark-event            Log bookmark events.\n"
-			"  -W, --word-boundary-event       Log word boundary events.\n"
-			"  -F, --phoneme-event             Log phoneme events.\n"
-			"  -N, --sentence-boundary-event   Log sentence boundary events.\n"
-			"  -I, --viseme-event              Log viseme events.\n"
-			"  -L, --audio-level-event         Log audio level events.\n",
+			L"  -h, --help                      Print this help.\n"
+			L"  -l, --list                      List all voices.\n"
+			L"  -o, --output=FILE               Output WAV file.\n"
+			L"  -v, --voice=VOICE               Select voice.\n"
+			L"  -t, --type=TYPE                 Input text type (PLAIN,SSML,SAPI,AUTO).\n"
+			L"  -r, --rate=RATE                 Rate (speed) of speech, from -10 to 10.\n"
+			L"  -V, --volume=VOL                Volume of speech, from 0 to 100.\n"
+			L"  -a, --all-events                Log all events in the EVNT RIFF chunk.\n"
+			L"  -S, --start-input-stream-event  Log start input stream events.\n"
+			L"  -E, --end-input-stream-event    Log end input stream events.\n"
+			L"  -C, --voice-change-event        Log voice change events.\n"
+			L"  -B, --bookmark-event            Log bookmark events.\n"
+			L"  -W, --word-boundary-event       Log word boundary events.\n"
+			L"  -F, --phoneme-event             Log phoneme events.\n"
+			L"  -N, --sentence-boundary-event   Log sentence boundary events.\n"
+			L"  -I, --viseme-event              Log viseme events.\n"
+			L"  -L, --audio-level-event         Log audio level events.\n",
 			argv[0]
 		);
 		return 1;
