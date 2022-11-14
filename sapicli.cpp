@@ -85,7 +85,9 @@ int listVoices() {
 			return 1;
 		}
 		wprintf(L"{\n");
-		printJsonKeyPair(L"id", idString);
+		WCHAR* idBasename = 0L;
+		idBasename = wcsrchr(idString, '\\');
+		printJsonKeyPair(L"id", idBasename && idBasename[0] ? idBasename + 1 : idString);
 
 		WCHAR* descriptionString = 0L;
 		hr = SpGetDescription(cpVoiceToken, &descriptionString);
