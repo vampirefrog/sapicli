@@ -1,3 +1,6 @@
-# sapicli
+SAPI command line interface
+===========================
 
-Command line tool to generate audio using SAPI.
+A simple tool to generate a `.wav` file from text.
+
+Using [getoptW](https://github.com/bluebaroncanada/getoptW).
