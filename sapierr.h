@@ -96,3 +96,12 @@ case SPERR_REENTER_SYNCHRONIZE: return L"An SR engine called synchronize while i
 case SPERR_STATE_WITH_NO_ARCS: return L"The grammar contains a node no arcs.";
 case SPERR_NOT_ACTIVE_SESSION: return L"Neither audio output nor input is supported for non-active console sessions.";
 case SPERR_ALREADY_DELETED: return L"The object is a stale reference and is invalid to use. For example, having an ISpeechGrammarRule object reference and then calling ISpeechRecoGrammar::Reset() will cause the rule object to be invalidated. Calling any methods after this will result in this error. ";
+
+case S_OK: return L"Success";
+case REGDB_E_CLASSNOTREG: return L"A specified class is not registered in the registration database.";
+case CLASS_E_NOAGGREGATION: return L"This class cannot be created as part of an aggregate.";
+case E_NOINTERFACE: return L"The specified class does not implement the requested interface, or the controlling IUnknown does not expose the requested interface.";
+case E_POINTER: return L"The ppv parameter is NULL.";
+case E_OUTOFMEMORY: return L"Out of memory.";
+case E_INVALIDARG: return L"Invalid argument.";
+case E_FAIL: return L"Failure";
