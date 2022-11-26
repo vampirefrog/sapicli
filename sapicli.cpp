@@ -244,7 +244,7 @@ public:
 		*format = pwfex;
 		return S_OK;
 	}
-	virtual STDMETHODIMP writeEventData(void *buf, ULONG sz) = 0;
+	virtual STDMETHODIMP writeEventData(void *buf, size_t sz) = 0;
 	const WCHAR *event_names[15] = {
 		L"undefined",
 		L"startInputStream",
@@ -365,9 +365,9 @@ public:
 	}
 
 	// FIXME: error checking
-	STDMETHODIMP writeEventData(void *buf, ULONG sz) {
+	STDMETHODIMP writeEventData(void *buf, size_t sz) {
 		if(!eh) return E_FAIL;
-		WriteFile(eh, buf, sz, 0, 0);
+		WriteFile(eh, buf, (ULONG)sz, 0, 0);
 		return S_OK;
 	}
 };
@@ -502,11 +502,11 @@ public:
 		return BaseSpStream::Close();
 	}
 	// FIXME: error checking
-	STDMETHODIMP writeEventData(void *buf, ULONG sz) {
+	STDMETHODIMP writeEventData(void *buf, size_t sz) {
 		return S_OK;
 		ogg_packet p;
 		p.packet = (unsigned char *)buf;
-		p.bytes = sz;
+		p.bytes = (ULONG)sz;
 		ogg_stream_packetin(&ogg_voice_st, &p);
 
 		while(1) {
