@@ -3,3 +3,4 @@ Win32
 x64
 sapicli.vcxproj.filters
 sapicli.vcxproj.user
+test

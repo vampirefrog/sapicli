@@ -6,6 +6,8 @@ A simple tool to generate audio from text.
 Using [getoptW](https://github.com/bluebaroncanada/getoptW).
 
 https://github.com/Essjay1/Windows-classic-samples/blob/master/Samples/Win7Samples/com/fundamentals/dcom/simple/sserver/sserver.cpp
+https://github.com/nodejs/node/issues/16553
+http://riaevangelist.github.io/node-ipc/
 
 Development process
 -------------------
