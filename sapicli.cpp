@@ -268,18 +268,13 @@ public:
 		return S_OK;
 	}
 
-	STDMETHODIMP SetBaseStream(IStream *pStream, REFGUID rguidFormat, const WAVEFORMATEX *pWaveFormatEx) {
-		wprintf(L"SetBaseStream\n");
-		return S_OK;
-	}
+	STDMETHODIMP SetBaseStream(IStream *pStream, REFGUID rguidFormat, const WAVEFORMATEX *pWaveFormatEx) { return S_OK; }
 
-	STDMETHODIMP GetBaseStream(IStream **ppStream) {
-		wprintf(L"GetBaseStream\n");
-		return S_OK;
-	}
+	STDMETHODIMP GetBaseStream(IStream **ppStream) { return S_OK; }
 
 	virtual STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
-		wprintf(L"BindToFile filename_=\"%s\" ullEventInterest=0x%04llx\n", filename_, ullEventInterest_);
+		if(SP_IS_BAD_STRING_PTR(filename_) || eMode >= SPFM_NUM_MODES || SP_IS_BAD_OPTIONAL_READ_PTR(pFormatId))
+			return E_INVALIDARG;
 
 		filename = filename_;
 		ullEventInterest = ullEventInterest_;
@@ -290,7 +285,7 @@ public:
 		if(isStdout) {
 			h = GetStdHandle(STD_OUTPUT_HANDLE);
 		} else {
-			h = CreateFileW(filename, GENERIC_WRITE, FILE_SHARE_READ, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, 0);
+			h = CreateFileW(filename_, GENERIC_WRITE, FILE_SHARE_READ, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, 0);
 			if(h == INVALID_HANDLE_VALUE) {
 				DWORD e = GetLastError();
 				WCHAR buf[MAX_PATH];
@@ -304,19 +299,16 @@ public:
 	}
 
 	virtual STDMETHODIMP Close(void) {
-		wprintf(L"Close\n");
-		if(!isStdout && h) {
-			BOOL b = CloseHandle(h);
-			if(!b) {
-				DWORD e = GetLastError();
-				WCHAR buf[MAX_PATH];
-				FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, 0, e, 0, buf, sizeof(buf) / sizeof(buf[0]), 0);
-				fwprintf(stderr, L"Could not close \"%s\": %d (%s)", filename, e, buf);
-				return HRESULT_FROM_WIN32(e);
-			}
-		}
+		if(isStdout || !h) return S_OK;
 
-		return S_OK;
+		BOOL b = CloseHandle(h);
+		if(b) return S_OK;
+
+		DWORD e = GetLastError();
+		WCHAR buf[MAX_PATH];
+		FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, 0, e, 0, buf, sizeof(buf) / sizeof(buf[0]), 0);
+		fwprintf(stderr, L"Could not close \"%s\": %d (%s)", filename, e, buf);
+		return HRESULT_FROM_WIN32(e);
 	}
 };
 
@@ -324,7 +316,7 @@ class RawSpStream: public BaseSpStream {
 public:
 	HANDLE eh; // events file handle
 
-	RawSpStream() {}
+	RawSpStream(): eh(0) {}
 
 	virtual STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
 		HRESULT hr = BaseSpStream::BindToFile(filename_, eMode, pFormatId, pWaveFormatEx, ullEventInterest_);
@@ -604,7 +596,11 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 		return 1;
 	}
 
-	outputStream->Close();
+	hr = outputStream->Close();
+	if(FAILED(hr)) {
+		fwprintf(stderr, L"Could not close %s: %d %s\n", wavFilename, hr, getErrorString(hr));
+		return 1;
+	}
 
 	if(voiceId && voiceId[0])
 		voiceToken.Release();
