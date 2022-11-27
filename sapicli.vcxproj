@@ -165,7 +165,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Debug\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis_static.lib</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Debug\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis_static.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\Debug\opus.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugDynamic|Win32'">
@@ -179,7 +179,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\DebugDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\DebugDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\DebugDLL\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseStatic|Win32'">
@@ -197,7 +197,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Release\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis_static.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Release\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis_static.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\Release\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDynamic|Win32'">
@@ -215,7 +215,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\ReleaseDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\ReleaseDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\ReleaseDLL\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugStatic|x64'">
@@ -229,7 +229,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Debug\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis_static.lib</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Debug\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis_static.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\Debug\opus.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugDynamic|x64'">
@@ -243,7 +243,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\DebugDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\DebugDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\DebugDLL\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseStatic|x64'">
@@ -261,7 +261,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Release\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis_static.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Release\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis_static.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\Release\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDynamic|x64'">
@@ -279,12 +279,16 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\ReleaseDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\ReleaseDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\ReleaseDLL\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="sapicli.cpp" />
     <ClCompile Include="getoptw.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="test.bat" />
+    <None Include="zip.bat" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

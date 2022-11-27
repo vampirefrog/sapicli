@@ -324,8 +324,8 @@ public:
 
 		if(isStdout) {
 			eh = (HANDLE)_get_osfhandle(3);
-		} else if(ullEventInterest) {
-			fwprintf(stderr, L"Cannot select events when output is not stdout\n");
+		} else if(ullEventInterest_) {
+			fwprintf(stderr, L"Cannot select events (0x%04llx) when output is not stdout\n", ullEventInterest_);
 			return E_INVALIDARG;
 		}
 
@@ -349,101 +349,254 @@ class OggSpStream: public BaseSpStream {
 public:
 	ogg_stream_state ogg_voice_st;
 	ogg_stream_state ogg_events_st;
-	ogg_page og;
-	ogg_packet op;
 	ULONG granulepos;
-	ULONG packetno;
-	vorbis_info vi;
-	vorbis_comment vc;
-	vorbis_dsp_state vd;
-	vorbis_block vb;
+	ULONG packetNo, eventpacketNo;
 
 	OggSpStream() {}
 
 	// FIXME: error checking
 	virtual STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
-		BaseSpStream::BindToFile(filename_, eMode, pFormatId, pWaveFormatEx, ullEventInterest_);
-		vorbis_info_init(&vi);
-		vorbis_encode_init_vbr(&vi, wfex.nChannels, wfex.nSamplesPerSec, 0.1f);
-		vorbis_comment_init(&vc);
-		vorbis_comment_add_tag(&vc, "ENCODER", "sapicli");
-		vorbis_analysis_init(&vd, &vi);
-		vorbis_block_init(&vd, &vb);
-		ogg_stream_init(&ogg_voice_st, 1);
-		ogg_stream_init(&ogg_events_st, 2);
-		granulepos = 0;
-		packetno = 0;
+		HRESULT hr = BaseSpStream::BindToFile(filename_, eMode, pFormatId, pWaveFormatEx, ullEventInterest_);
+		if(FAILED(hr)) {
+			fwprintf(stderr, L"Could not bind to file %s: %d %s\n", filename_, hr, getErrorString(hr));
+			return hr;
+		}
 
-		{
-			ogg_packet header;
-			ogg_packet header_comm;
-			ogg_packet header_code;
+		if(ogg_stream_init(&ogg_voice_st, 1)) {
+			fwprintf(stderr, L"Could not initialize ogg stream\n");
+			return E_FAIL;
+		}
 
-			vorbis_analysis_headerout(&vd, &vc, &header, &header_comm, &header_code);
-			ogg_stream_packetin(&ogg_voice_st, &header); /* automatically placed in its own page */
-			while(ogg_stream_flush(&ogg_voice_st, &og)) {
-				WriteFile(h, og.header, og.header_len, 0, 0);
-				WriteFile(h, og.body, og.body_len, 0, 0);
-			}
+		if(ogg_stream_init(&ogg_events_st, 2)) {
+			fwprintf(stderr, L"Could not initialize ogg stream\n");
+			return E_FAIL;
+		}
 
-			if(ullEventInterest != 0) {
-				unsigned char evntHead[8] = { 'S', 'A', 'P', 'I', 'E', 'V', 'N', 'T' };
-				ogg_packet p;
-				memset(&p, 0, sizeof(p));
-				p.packet = evntHead;
-				p.bytes = 8;
-				p.b_o_s = 1;
-				ogg_stream_packetin(&ogg_events_st, &p);
-				while(ogg_stream_flush(&ogg_events_st, &og)) {
-					WriteFile(h, og.header, og.header_len, 0, 0);
-					WriteFile(h, og.body, og.body_len, 0, 0);
-				}
-			}
+		granulepos = packetNo = eventpacketNo = 0;
 
-			ogg_stream_packetin(&ogg_voice_st, &header_comm);
-			ogg_stream_packetin(&ogg_voice_st, &header_code);
-			while(ogg_stream_flush(&ogg_voice_st, &og)) {
-				WriteFile(h, og.header, og.header_len, 0, 0);
-				WriteFile(h, og.body, og.body_len, 0, 0);
+		return S_OK;
+	}
+
+	STDMETHODIMP writeEventHead() {
+		if(ullEventInterest == 0) return S_OK;
+		unsigned char evntHead[8] = { 'S', 'A', 'P', 'I', 'E', 'V', 'N', 'T' };
+
+		ogg_packet p;
+		p.packet = evntHead;
+		p.bytes = 8;
+		p.b_o_s = 1;
+		p.e_o_s = 0;
+		p.granulepos = 0;
+		p.packetno = eventpacketNo++;
+		if(ogg_stream_packetin(&ogg_events_st, &p)) {
+			fwprintf(stderr, L"Could not add the header packet to the events stream\n");
+			return E_FAIL;
+		}
+		return flushStream(&ogg_events_st);
+	}
+
+	// FIXME: error checking
+	STDMETHODIMP writeEventData(void *buf, size_t sz) {
+		if(ullEventInterest == 0) return S_OK;
+
+		ogg_packet p;
+		p.packet = (unsigned char *)buf;
+		p.bytes = (ULONG)sz;
+		p.e_o_s = 0;
+		p.b_o_s = 0;
+		p.granulepos = granulepos;
+		p.packetno = eventpacketNo++;
+		if(ogg_stream_packetin(&ogg_events_st, &p)) {
+			fwprintf(stderr, L"Could not add a data packet of length %lu to the events stream\n", (ULONG)sz);
+			return E_FAIL;
+		}
+		return pageoutStream(&ogg_events_st);
+	}
+
+	STDMETHODIMP flushEventStream(void) {
+		if(ullEventInterest == 0) return S_OK;
+
+		ogg_packet p;
+		p.packet = 0;
+		p.bytes = 0;
+		p.b_o_s = 0;
+		p.e_o_s = 1;
+		p.granulepos = granulepos;
+		p.packetno = eventpacketNo;
+		if(ogg_stream_packetin(&ogg_events_st, &p)) {
+			fwprintf(stderr, L"Could not add the final packet to the events stream\n");
+			return E_FAIL;
+		}
+		return flushStream(&ogg_events_st);
+	}
+
+	virtual STDMETHODIMP Write(const void *buf, ULONG size, ULONG *newPos) = 0;
+
+	HRESULT STDMETHODCALLTYPE Close() {
+		flushEventStream();
+
+		if(ogg_stream_clear(&ogg_voice_st)) {
+			fwprintf(stderr, L"Could not clear voice stream\n");
+			return E_FAIL;
+		}
+		if(ogg_stream_clear(&ogg_events_st)) {
+			fwprintf(stderr, L"Could not clear events stream\n");
+			return E_FAIL;
+		}
+
+		return BaseSpStream::Close();
+	}
+
+	STDMETHODIMP writePage(ogg_page *p) {
+		BOOL r = WriteFile(h, p->header, p->header_len, 0, 0);
+		if(r) r = WriteFile(h, p->body, p->body_len, 0, 0);
+		if(r) return S_OK;
+
+		DWORD e = GetLastError();
+		WCHAR buf[MAX_PATH];
+		FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, 0, e, 0, buf, sizeof(buf) / sizeof(buf[0]), 0);
+		fwprintf(stderr, L"Could not write to %s: %d (%s)", isStdout ? L"stdout" : filename, e, buf);
+		return HRESULT_FROM_WIN32(e);
+	}
+
+	STDMETHODIMP pageoutStream(ogg_stream_state *os) {
+		ogg_page p;
+		while(ogg_stream_pageout(os, &p)) {
+			HRESULT hr = writePage(&p);
+			if(hr != S_OK) {
+				fwprintf(stderr, L"Could not write page: %d %s\n", hr, getErrorString(hr));
+				return hr;
 			}
 		}
 
 		return S_OK;
 	}
 
+	STDMETHODIMP flushStream(ogg_stream_state *os) {
+		ogg_page p;
+		while(ogg_stream_flush(os, &p)) {
+			HRESULT hr = writePage(&p);
+			if(hr != S_OK) {
+				fwprintf(stderr, L"Could not write page: %d %s\n", hr, getErrorString(hr));
+				return hr;
+			}
+		}
+
+		return S_OK;
+	}
+};
+
+class OggVorbisSpStream: public OggSpStream {
+public:
+	vorbis_info vi;
+	vorbis_comment vc;
+	vorbis_dsp_state vd;
+	vorbis_block vb;
+
+	OggVorbisSpStream() {}
+
+	// FIXME: error checking
+	STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
+		OggSpStream::BindToFile(filename_, eMode, pFormatId, pWaveFormatEx, ullEventInterest_);
+		vorbis_info_init(&vi);
+		vorbis_encode_init_vbr(&vi, wfex.nChannels, wfex.nSamplesPerSec, 0.1f);
+		vorbis_comment_init(&vc);
+		vorbis_comment_add_tag(&vc, "ENCODER", "sapicli");
+		vorbis_analysis_init(&vd, &vi);
+		vorbis_block_init(&vd, &vb);
+
+		ogg_packet header;
+		ogg_packet header_comm;
+		ogg_packet header_code;
+
+		vorbis_analysis_headerout(&vd, &vc, &header, &header_comm, &header_code);
+		ogg_stream_packetin(&ogg_voice_st, &header); /* automatically placed in its own page */
+		HRESULT hr = flushStream(&ogg_voice_st);
+		if(hr != S_OK) return hr;
+
+		hr = writeEventHead();
+		if(hr != S_OK) return hr;
+
+		ogg_stream_packetin(&ogg_voice_st, &header_comm);
+		ogg_stream_packetin(&ogg_voice_st, &header_code);
+		return flushStream(&ogg_voice_st);
+	}
+
 	HRESULT STDMETHODCALLTYPE Write(const void *buf, ULONG size, ULONG *newPos) {
-		int eos = 0;
 		if(size == 0) {
 			vorbis_analysis_wrote(&vd, 0);
 		} else {
-			int nSamples = size * 8 / wfex.wBitsPerSample/ wfex.nChannels;
+			int nSamples = size * 8 / wfex.wBitsPerSample / wfex.nChannels;
+			granulepos += nSamples;
 			float **buffer = vorbis_analysis_buffer(&vd, nSamples);
 
-			for(int j = 0; j < wfex.nChannels; j++) {
-				float *sample = buffer[j];
+			/* Optimized copy for common combination of bit depths and numbers of channels */
+			if(wfex.wBitsPerSample == 8 && wfex.nChannels == 1) {
+				char *srcSample = (char *)buf;
+				float *sample0 = buffer[0];
 				for(int i = 0; i < nSamples; i++) {
-					float sm = wfex.wBitsPerSample == 16 ? ((short *)buf)[i] / 32768.f : ((char *)buf)[i] / 256.f;
-					*(sample++) = sm;
+					*(sample0++) = *(srcSample++) / 128.f;
+				}
+			} else if(wfex.wBitsPerSample == 8 && wfex.nChannels == 2) {
+				char *srcSample = (char *)buf;
+				float *sample0 = buffer[0];
+				float *sample1 = buffer[1];
+				for(int i = 0; i < nSamples; i++) {
+					*(sample0++) = *(srcSample++) / 128.f;
+					*(sample1++) = *(srcSample++) / 128.f;
+				}
+			} else if(wfex.wBitsPerSample == 16 && wfex.nChannels == 1) {
+				short *srcSample = (short *)buf;
+				float *sample0 = buffer[0];
+				for(int i = 0; i < nSamples; i++) {
+					*(sample0++) = *(srcSample++) / 32768.f;
+				}
+			} else if(wfex.wBitsPerSample == 16 && wfex.nChannels == 2) {
+				short *srcSample = (short *)buf;
+				float *sample0 = buffer[0];
+				float *sample1 = buffer[1];
+				for(int i = 0; i < nSamples; i++) {
+					*(sample0++) = *(srcSample++) / 32768.f;
+					*(sample1++) = *(srcSample++) / 32768.f;
+				}
+			} else {
+				/* Generic, rarely used, slow method */
+				int bytesPerSample = (wfex.wBitsPerSample + 7) >> 3;
+				float divisor = (float)(1 << (wfex.wBitsPerSample - 1));
+				char *startSrcSample = (char *)buf;
+				int strideSkip = bytesPerSample * wfex.nChannels;
+				for(int j = 0; j < wfex.nChannels; j++) {
+					float *sample = buffer[j];
+					char *srcSample = startSrcSample;
+					for(int i = 0; i < nSamples; i++) {
+						LONGLONG srcSampleAccum = (srcSample[bytesPerSample - 1] < 0) ? -1 : 0;
+						memcpy((void *)&srcSampleAccum, srcSample, bytesPerSample);
+						srcSample += strideSkip;
+						*(sample++) = (float)srcSampleAccum / divisor;
+					}
+					startSrcSample += bytesPerSample;
 				}
 			}
 
 			vorbis_analysis_wrote(&vd, nSamples);
 		}
 
+		int eos = 0;
 		while(vorbis_analysis_blockout(&vd, &vb) == 1) {
 			vorbis_analysis(&vb, NULL);
 			vorbis_bitrate_addblock(&vb);
 
-			while(vorbis_bitrate_flushpacket(&vd, &op)) {
-				ogg_stream_packetin(&ogg_voice_st, &op);
+			ogg_packet p;
+			while(vorbis_bitrate_flushpacket(&vd, &p)) {
+				ogg_stream_packetin(&ogg_voice_st, &p);
 
 				while(!eos) {
-					int result = ogg_stream_pageout(&ogg_voice_st, &og);
+					ogg_page p;
+					int result = ogg_stream_pageout(&ogg_voice_st, &p);
 					if(result == 0) break;
-					WriteFile(h, og.header, og.header_len, 0, 0);
-					WriteFile(h, og.body, og.body_len, 0, 0);
+					writePage(&p);
 
-					if(ogg_page_eos(&og)) eos = 1;
+					if(ogg_page_eos(&p)) eos = 1;
 				}
 			}
 		}
@@ -451,44 +604,189 @@ public:
 		if(newPos) *newPos += size;
 		return S_OK;
 	}
+
 	HRESULT STDMETHODCALLTYPE Close() {
 		Write(0, 0, 0);
-		if(ullEventInterest != 0) {
-			ogg_packet p;
-			memset(&p, 0, sizeof(p));
-			p.packet = 0;
-			p.bytes = 0;
-			p.e_o_s = 1;
-			ogg_stream_packetin(&ogg_events_st, &p);
-			while(ogg_stream_pageout(&ogg_events_st, &og)) {
-				WriteFile(h, og.header, og.header_len, 0, 0);
-				WriteFile(h, og.body, og.body_len, 0, 0);
-			}
-		}
-
-		ogg_stream_clear(&ogg_voice_st);
-		ogg_stream_clear(&ogg_events_st);
 		vorbis_block_clear(&vb);
 		vorbis_dsp_clear(&vd);
 		vorbis_comment_clear(&vc);
 		vorbis_info_clear(&vi);
-		return BaseSpStream::Close();
+		return OggSpStream::Close();
 	}
-	// FIXME: error checking
-	STDMETHODIMP writeEventData(void *buf, size_t sz) {
-		return S_OK;
-		ogg_packet p;
-		p.packet = (unsigned char *)buf;
-		p.bytes = (ULONG)sz;
-		ogg_stream_packetin(&ogg_voice_st, &p);
+};
 
-		while(1) {
-			int result = ogg_stream_pageout(&ogg_events_st, &og);
-			if(result == 0) break;
-			WriteFile(h, og.header, og.header_len, 0, 0);
-			WriteFile(h, og.body, og.body_len, 0, 0);
+class OggOpusSpStream: public OggSpStream {
+public:
+	OpusEncoder *enc;
+	opus_int16 frame[2880 * 2]; // max frame size times two channels
+	int framepos;
+	int framesize;
+
+	OggOpusSpStream(): enc(0), framepos(0), framesize(960) {}
+
+	const WCHAR *getOpusErrorString(int err) {
+		switch(err) {
+			case OPUS_OK: return L"No error";
+			case OPUS_BAD_ARG: return L"One or more invalid / out of range arguments.";
+			case OPUS_BUFFER_TOO_SMALL: return L"Not enough bytes allocated in the buffer.";
+			case OPUS_INTERNAL_ERROR: return L"An internal error was detected.";
+			case OPUS_INVALID_PACKET: return L"The compressed data passed is corrupted.";
+			case OPUS_UNIMPLEMENTED: return L"Invalid / unsupported request number.";
+			case OPUS_INVALID_STATE: return L"An encoder or decoder structure is invalid or already freed.";
+			case OPUS_ALLOC_FAIL: return L"Memory allocation has failed.";
 		}
+
+		return L"Unknown error";
+	}
+
+	HRESULT opusToHresult(int err) {
+		switch(err) {
+			case OPUS_OK: return S_OK;
+			case OPUS_BAD_ARG: return E_INVALIDARG;
+			case OPUS_BUFFER_TOO_SMALL: return E_NOT_SUFFICIENT_BUFFER;
+			case OPUS_INTERNAL_ERROR: return E_FAIL;
+			case OPUS_INVALID_PACKET: return E_INVALID_PROTOCOL_FORMAT;
+			case OPUS_UNIMPLEMENTED: return E_NOTIMPL;
+			case OPUS_INVALID_STATE: return E_FAIL;
+			case OPUS_ALLOC_FAIL: return E_FAIL;
+		}
+
+		return E_FAIL;
+	}
+
+	// FIXME: error checking
+	STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
+		OggSpStream::BindToFile(filename_, eMode, pFormatId, pWaveFormatEx, ullEventInterest_);
+		int err;
+		if(wfex.wBitsPerSample != 16) {
+			fwprintf(stderr, L"Only 16 bit depth is supported for opus\n");
+			return E_INVALIDARG;
+		}
+		enc = opus_encoder_create(wfex.nSamplesPerSec, wfex.nChannels, OPUS_APPLICATION_VOIP, &err);
+		if(err != OPUS_OK) {
+			fwprintf(stderr, L"Error creating encoder: %d %s\n", err, getOpusErrorString(err));
+			return opusToHresult(err);
+		}
+		opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+		framesize = wfex.nSamplesPerSec * 20 / 1000;
+		ogg_packet header;
+		int lookahead = 3840;
+		opus_encoder_ctl(enc, OPUS_GET_LOOKAHEAD(&lookahead));
+		unsigned char opusHeader[19] = {
+			'O', 'p', 'u', 's',
+			'H', 'e', 'a', 'd',
+			1,
+			(unsigned char)wfex.nChannels,
+			(unsigned char)(lookahead >> 0),
+			(unsigned char)(lookahead >> 8),
+			(unsigned char)(wfex.nSamplesPerSec >> 0),
+			(unsigned char)(wfex.nSamplesPerSec >> 8),
+			(unsigned char)(wfex.nSamplesPerSec >> 16),
+			(unsigned char)(wfex.nSamplesPerSec >> 24),
+			0x00, 0x00,
+			0
+		};
+		header.packet = opusHeader;
+		header.bytes = sizeof(opusHeader);
+		header.b_o_s = 1;
+		header.e_o_s = 0;
+		header.granulepos = 0;
+		header.packetno = packetNo++;
+		ogg_stream_packetin(&ogg_voice_st, &header);
+		HRESULT hr = flushStream(&ogg_voice_st);
+		if(hr != S_OK) return hr;
+
+		hr = writeEventHead();
+		if(hr != S_OK) return hr;
+
+		unsigned char opusTags[42] = {
+			'O', 'p', 'u', 's',
+			'T', 'a', 'g', 's',
+			7, 0, 0, 0,
+			's', 'a', 'p', 'i', 'c', 'l', 'i',
+			1, 0, 0, 0,
+			15, 0, 0, 0,
+			'E', 'N', 'C', 'O', 'D', 'E', 'R', '=',
+			's', 'a', 'p', 'i', 'c', 'l', 'i'
+		};
+		header.packet = opusTags;
+		header.bytes = sizeof(opusTags);
+		header.b_o_s = 0;
+		header.e_o_s = 0;
+		header.granulepos = 0;
+		header.packetno = packetNo++;
+		ogg_stream_packetin(&ogg_voice_st, &header);
+		return flushStream(&ogg_voice_st);
+	}
+
+	STDMETHODIMP Write(const void *buf, ULONG size, ULONG *newPos) {
+		int nSamples = size * 8 / wfex.wBitsPerSample / wfex.nChannels;
+		unsigned char encbuf[4096];
+		if(wfex.wBitsPerSample == 16) {
+			short *samples = (short *)buf;
+			for(int x = 0; x < nSamples; x++) {
+				for(int i = 0; i < wfex.nChannels; i++) {
+					frame[framepos * wfex.nChannels + i] = *(samples++);
+				}
+				framepos++;
+				if(framepos >= framesize) {
+					int encoded = opus_encode(enc, frame, framesize, encbuf, sizeof(encbuf));
+					if(encoded < 0) {
+						fwprintf(stderr, L"Could not encode %d samples of opus data %d %s\n", framesize, encoded, getOpusErrorString(encoded));
+						return E_FAIL;
+					}
+					if(encoded > 2) {
+						ogg_packet p;
+						p.packet = encbuf;
+						p.bytes = encoded;
+						p.b_o_s = p.e_o_s = 0;
+						granulepos += framesize;
+						p.granulepos = granulepos;
+						p.packetno = packetNo++;
+						if(ogg_stream_packetin(&ogg_voice_st, &p)) {
+							fwprintf(stderr, L"Could not write opus voice packet of length %d to ogg stream\n", p.bytes);
+							return E_FAIL;
+						}
+						HRESULT hr = pageoutStream(&ogg_voice_st);
+						if(hr != S_OK) return hr;
+					}
+					framepos = 0;
+				}
+			}
+		}
+
+		if(newPos) *newPos += size;
 		return S_OK;
+	}
+
+	STDMETHODIMP Close() {
+		unsigned char encbuf[4096];
+		memset(frame + framepos * wfex.nChannels, 0, (framesize - framepos) * wfex.nChannels);
+		int encoded = opus_encode(enc, frame, framesize, encbuf, sizeof(encbuf));
+		if(encoded < 0) {
+			fwprintf(stderr, L"Could not encode final %d (%d) samples of opus data %d %s\n", framesize, framepos, encoded, getOpusErrorString(encoded));
+			return E_FAIL;
+		}
+
+		ogg_packet p;
+		p.packet = encbuf;
+		p.bytes = encoded > 2 ? encoded : 0;
+		p.b_o_s = 0;
+		p.e_o_s = 1;
+		granulepos += framepos;
+		p.granulepos = granulepos;
+		p.packetno = packetNo++;
+		if(ogg_stream_packetin(&ogg_voice_st, &p)) {
+			fwprintf(stderr, L"Could not add final packet to voice stream\n");
+			return E_FAIL;
+		}
+		HRESULT hr = flushStream(&ogg_voice_st);
+		if(hr != S_OK) return hr;
+
+		opus_encoder_destroy(enc);
+		enc = 0;
+
+		return OggSpStream::Close();
 	}
 };
 
@@ -551,15 +849,17 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 
 	ISpStream *outputStream = 0;
 
-	if(outType == 2) {
+	if(outType == 1) {
+		outputStream = new RawSpStream();
+	} else if(outType == 2) {
 		HRESULT hr = ::CoCreateInstance(CLSID_SpStream, NULL, CLSCTX_ALL, __uuidof(outputStream), (void **)&outputStream);
 		if(FAILED(hr)) {
 			fwprintf(stderr, L"Could not instantiate SpStream: %d %s\n", hr, getErrorString(hr));
 		}
 	} else if(outType == 3) {
-		outputStream = new OggSpStream();
-	} else if(outType == 1) {
-		outputStream = new RawSpStream();
+		outputStream = new OggVorbisSpStream();
+	} else if(outType == 4) {
+		outputStream = new OggOpusSpStream();
 	} else {
 		fwprintf(stderr, L"Invalid output type %d\n", outType);
 		return E_INVALIDARG;
@@ -595,6 +895,9 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 		fwprintf(stderr, L"Could not speak: %d %s\n", hr, getErrorString(hr));
 		return 1;
 	}
+
+	// Release here so the destructor doesn't do it after we've closed the output file
+	voice.Release();
 
 	hr = outputStream->Close();
 	if(FAILED(hr)) {
@@ -664,8 +967,10 @@ int wmain(int argc, WCHAR *argv[]) {
 					outType = 1;
 				else if(!_wcsicmp(optarg, L"wav"))
 					outType = 2;
-				else if(!_wcsicmp(optarg, L"ogg"))
+				else if(!_wcsicmp(optarg, L"ogg") || !_wcsicmp(optarg, L"ogg+vorbis"))
 					outType = 3;
+				else if(!_wcsicmp(optarg, L"ogg+opus"))
+					outType = 4;
 				else
 					help = 1;
 				break;
@@ -721,7 +1026,8 @@ int wmain(int argc, WCHAR *argv[]) {
 			L"                                  Use `-' for stdout.\n"
 			L"  -T, --out-type=TYPE             Output file type. Default is `auto'\n"
 			L"                                  `wav' for RIFF .wav\n"
-			L"                                  `ogg' for Ogg Vorbis\n"
+			L"                                  `ogg' or `ogg+vorbis' for Ogg Vorbis\n"
+			L"                                  `ogg+opus' for Ogg Opus\n"
 			L"                                  `raw' for raw PCM samples\n"
 			L"                                  `auto' to autodetect from file extension\n"
 			L"  -v, --voice=VOICE               Select voice.\n"
