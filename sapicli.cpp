@@ -245,25 +245,6 @@ public:
 		return S_OK;
 	}
 	virtual STDMETHODIMP writeEventData(void *buf, size_t sz) = 0;
-	const WCHAR *event_names[15] = {
-		L"undefined",
-		L"startInputStream",
-		L"endInputStream",
-		L"voiceChange",
-		L"ttsBookmark",
-		L"wordBoundary",
-		L"phoneme",
-		L"sentenceBoundary",
-		L"viseme",
-		L"ttsAudioLevel",
-	};
-	STDMETHODIMP writeJsonEvent(const SPEVENT *ev) {
-		WCHAR buf[MAX_PATH];
-		ULONGLONG timeMs = ev->ullAudioStreamOffset * 1000 / 16000;
-		_snwprintf_s(buf, sizeof(buf) / sizeof(buf[0]), L"{\"type\":\"%s\",\"timeMs\":%llu}\n", event_names[ev->eEventId < 15 ? ev->eEventId : 0], timeMs);
-		writeEventData(buf, wcslen(buf) * sizeof(buf[0]));
-		return S_OK;
-	}
 	// FIXME: optimize by not allocating every time
 	STDMETHODIMP writeSpEvent(const SPEVENT *ev) {
 		CSpEvent cspev;
