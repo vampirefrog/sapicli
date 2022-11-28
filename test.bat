@@ -7,9 +7,9 @@ FOR %%P IN (Win32 x64) DO (
 			SET EXT=%%F
 			IF !EXT!==ogg+vorbis SET EXT=ogg
 			IF !EXT!==ogg+opus SET EXT=ogg
-			FOR %%S IN (8000 11025 12000 16000 22050 24000 44100 48000) DO (
-				FOR %%B IN (8 12 16 24 32) DO (
-					FOR %%N IN (1 2 3) DO (
+			FOR %%S IN (8000 16000 22050 48000) DO (
+				FOR %%B IN (8 16) DO (
+					FOR %%N IN (1 2) DO (
 						FOR %%E IN (0 288 all) DO (
 							FOR %%V IN (DAVID ZIRA) DO (
 								DEL stdout.txt
