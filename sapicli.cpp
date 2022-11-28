@@ -853,7 +853,7 @@ public:
 			p.packet = encbuf;
 			p.bytes = encoded;
 			p.b_o_s = p.e_o_s = 0;
-			p.granulepos = granulepos;
+			p.granulepos = granulepos * 48000 / wfex.nSamplesPerSec;
 			p.packetno = packetNo++;
 			if(ogg_stream_packetin(&ogg_voice_st, &p)) {
 				fwprintf(stderr, L"Could not write opus voice packet of length %d to ogg stream\n", p.bytes);
@@ -884,7 +884,7 @@ public:
 		p.b_o_s = 0;
 		p.e_o_s = 1;
 		granulepos += framepos;
-		p.granulepos = granulepos;
+		p.granulepos = granulepos * 48000 / wfex.nSamplesPerSec;
 		p.packetno = packetNo++;
 		if(ogg_stream_packetin(&ogg_voice_st, &p)) {
 			fwprintf(stderr, L"Could not add final packet to voice stream\n");
