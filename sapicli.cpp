@@ -755,6 +755,7 @@ public:
 		if(FAILED(hr)) return hr;
 
 		opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+		opus_encoder_ctl(enc, OPUS_SET_BITRATE(10000));
 		framesize = pWaveFormatEx->nSamplesPerSec * 20 / 1000;
 		ogg_packet header;
 		int lookahead = 3840;
