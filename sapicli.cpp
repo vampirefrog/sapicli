@@ -860,7 +860,11 @@ public:
 				return E_FAIL;
 			}
 
-			HRESULT hr = pageoutStream(&ogg_voice_st);
+			HRESULT hr;
+			if(granulepos % (framesize * 50))
+				hr = pageoutStream(&ogg_voice_st);
+			else
+				hr = flushStream(&ogg_voice_st);
 			if(hr != S_OK) return hr;
 		}
 
