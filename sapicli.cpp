@@ -360,8 +360,8 @@ class OggSpStream: public BaseSpStream {
 public:
 	ogg_stream_state ogg_voice_st;
 	ogg_stream_state ogg_events_st;
-	ULONG granulepos;
-	ULONG packetNo, eventpacketNo;
+	ogg_int64_t granulepos;
+	ogg_int64_t packetNo, eventpacketNo;
 
 	OggSpStream(): granulepos(0), packetNo(0), eventpacketNo(0) {}
 
@@ -433,7 +433,7 @@ public:
 		p.b_o_s = 0;
 		p.e_o_s = 1;
 		p.granulepos = granulepos;
-		p.packetno = eventpacketNo;
+		p.packetno = eventpacketNo++;
 		if(ogg_stream_packetin(&ogg_events_st, &p)) {
 			fwprintf(stderr, L"Could not add the final packet to the events stream\n");
 			return E_FAIL;
@@ -736,8 +736,12 @@ public:
 
 	STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
 		int err;
-		if(pWaveFormatEx->wBitsPerSample != 16) {
-			fwprintf(stderr, L"Only 16 bit depth is supported for opus\n");
+		if(pWaveFormatEx->wBitsPerSample != 16 && pWaveFormatEx->wBitsPerSample != 8) {
+			fwprintf(stderr, L"Only 8 and 16 bit depth is supported for opus\n");
+			return E_INVALIDARG;
+		}
+		if(pWaveFormatEx->nChannels != 1 && pWaveFormatEx->nChannels != 2) {
+			fwprintf(stderr, L"Only 1 or 2 channels are supported for opus\n");
 			return E_INVALIDARG;
 		}
 		enc = opus_encoder_create(pWaveFormatEx->nSamplesPerSec, pWaveFormatEx->nChannels, OPUS_APPLICATION_VOIP, &err);
@@ -752,7 +756,6 @@ public:
 
 		opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
 		framesize = pWaveFormatEx->nSamplesPerSec * 20 / 1000;
-		framesize = 960;
 		ogg_packet header;
 		int lookahead = 3840;
 		opus_encoder_ctl(enc, OPUS_GET_LOOKAHEAD(&lookahead));
@@ -812,40 +815,57 @@ public:
 	STDMETHODIMP Write(const void *buf, ULONG size, ULONG *newPos) {
 		int nSamples = size * 8 / wfex.wBitsPerSample / wfex.nChannels;
 		unsigned char encbuf[4096];
-		if(wfex.wBitsPerSample == 16) {
-			short *samples = (short *)buf;
-			for(int x = 0; x < nSamples; x++) {
-				for(int i = 0; i < wfex.nChannels; i++) {
-					frame[framepos * wfex.nChannels + i] = *(samples++);
-				}
-				framepos++;
-				if(framepos >= framesize) {
-					int encoded = opus_encode(enc, frame, framesize, encbuf, sizeof(encbuf));
-					if(encoded < 0) {
-						fwprintf(stderr, L"Could not encode %d samples of opus data %d %s\n", framesize, encoded, getOpusErrorString(encoded));
-						return E_FAIL;
-					}
-					if(encoded > 2) {
-						ogg_packet p;
-						p.packet = encbuf;
-						p.bytes = encoded;
-						p.b_o_s = p.e_o_s = 0;
-						granulepos += framesize;
-						p.granulepos = granulepos;
-						p.packetno = packetNo++;
-						if(ogg_stream_packetin(&ogg_voice_st, &p)) {
-							fwprintf(stderr, L"Could not write opus voice packet of length %d to ogg stream\n", p.bytes);
-							return E_FAIL;
-						}
-						HRESULT hr = pageoutStream(&ogg_voice_st);
-						if(hr != S_OK) return hr;
-					}
-					framepos = 0;
-				}
+		if(wfex.wBitsPerSample != 16 && wfex.wBitsPerSample != 8 || wfex.nChannels != 1 && wfex.nChannels != 2)
+			return E_INVALIDARG;
+		short *samples16 = (short *)buf;
+		unsigned char *samples8 = (unsigned char *)buf;
+		opus_int16 *frameptr = &frame[framepos * wfex.nChannels];
+		for(int x = 0; x < nSamples; x++) {
+			if(wfex.wBitsPerSample == 16) {
+				*(frameptr++) = *(samples16++);
+				if(wfex.nChannels == 2)
+					*(frameptr++) = *(samples16++);
+			} else {
+				*(frameptr++) = (*samples8 - 128) << 8 | *(samples8++);
+				if(wfex.nChannels == 2)
+					*(frameptr++) = (*samples8 - 128) << 8 | *(samples8++);
 			}
+
+			granulepos++;
+
+			framepos++;
+			if(framepos < framesize)
+				continue;
+
+			framepos = 0;
+			frameptr = frame;
+
+			int encoded = opus_encode(enc, frame, framesize, encbuf, sizeof(encbuf));
+			if(encoded < 0) {
+				fwprintf(stderr, L"Could not encode %d samples of opus data %d %s\n", framesize, encoded, getOpusErrorString(encoded));
+				return opusToHresult(encoded);
+			}
+
+			if(encoded <= 2)
+				continue;
+
+			ogg_packet p;
+			p.packet = encbuf;
+			p.bytes = encoded;
+			p.b_o_s = p.e_o_s = 0;
+			p.granulepos = granulepos;
+			p.packetno = packetNo++;
+			if(ogg_stream_packetin(&ogg_voice_st, &p)) {
+				fwprintf(stderr, L"Could not write opus voice packet of length %d to ogg stream\n", p.bytes);
+				return E_FAIL;
+			}
+
+			HRESULT hr = pageoutStream(&ogg_voice_st);
+			if(hr != S_OK) return hr;
 		}
 
 		if(newPos) *newPos += size;
+
 		return S_OK;
 	}
 
