@@ -1074,6 +1074,9 @@ int wmain(int argc, WCHAR *argv[]) {
 	int option_index = 0;
 	while(1) {
 		option = getoptW_long(argc, argv, L"hlo:T:v:t:r:Vs:b:c:e:", long_options, &option_index);
+		if(option == L'?') {
+			return 1;
+		}
 
 		if(option == -1) break;
 
