@@ -16,6 +16,9 @@
 
 #include <vorbis/vorbisenc.h>
 #include <opus.h>
+#include <lame.h>
+
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #include "getoptw.h"
 
@@ -281,7 +284,7 @@ public:
 		formatId = pFormatId;
 		CopyMemory(&wfex, pWaveFormatEx, sizeof(WAVEFORMATEX));
 
-		isStdout = filename_ && filename[0] == '-' && filename[1] == 0;
+		isStdout = filename_ && filename_[0] == '-' && filename_[1] == 0;
 		if(isStdout) {
 			h = GetStdHandle(STD_OUTPUT_HANDLE);
 		} else {
@@ -319,11 +322,14 @@ public:
 	RawSpStream(): eh(0) {}
 
 	virtual STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
-		if(isStdout) {
-			eh = (HANDLE)_get_osfhandle(3);
-		} else if(ullEventInterest_) {
-			fwprintf(stderr, L"Cannot select events (0x%04llx) when output is not stdout\n", ullEventInterest_);
-			return E_INVALIDARG;
+		isStdout = filename_ && filename_[0] == '-' && filename_[1] == 0;
+		if(ullEventInterest_) {
+			if(isStdout) {
+				eh = (HANDLE)_get_osfhandle(3);
+			} else {
+				fwprintf(stderr, L"Cannot select events (0x%04llx) when output is not stdout\n", ullEventInterest_);
+				return E_INVALIDARG;
+			}
 		}
 
 		HRESULT hr = BaseSpStream::BindToFile(filename_, eMode, pFormatId, pWaveFormatEx, ullEventInterest_);
@@ -905,6 +911,100 @@ public:
 	}
 };
 
+class Mp3SpStream: public RawSpStream {
+public:
+	HANDLE eh; // events file handle
+	lame_global_flags *gfp;
+	unsigned char encodebuf[16384];
+
+	Mp3SpStream(): eh(0), gfp(0) {}
+
+	virtual STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
+		gfp = lame_init();
+		if(!gfp) {
+			fwprintf(stderr, L"Could not init lame encoder\n");
+			return E_OUTOFMEMORY;
+		}
+		if(lame_set_num_channels(gfp, pWaveFormatEx->nChannels)) {
+			fwprintf(stderr, L"Could not set lame encoder number of channels to %d\n", pWaveFormatEx->nChannels);
+			return E_INVALIDARG;
+		}
+		if(lame_set_in_samplerate(gfp, pWaveFormatEx->nSamplesPerSec)) {
+			fwprintf(stderr, L"Could not set lame encoder sample rate to %d\n", pWaveFormatEx->nSamplesPerSec);
+			return E_INVALIDARG;
+		}
+		if(lame_set_brate(gfp, 128)) {
+			fwprintf(stderr, L"Could not set lame encoder bit rate to %d\n", 128);
+			return E_INVALIDARG;
+		}
+		if(lame_set_mode(gfp, pWaveFormatEx->nChannels == 2 ? STEREO : MONO)) {
+			fwprintf(stderr, L"Could not set lame encoder mode\n");
+			return E_INVALIDARG;
+		}
+		/* 2=high  5 = medium  7=low */
+		if(lame_set_quality(gfp, 5)) {
+			fwprintf(stderr, L"Could not set lame encoder quality\n");
+			return E_INVALIDARG;
+		}
+		if(lame_set_bWriteVbrTag(gfp, 0)) {
+			fwprintf(stderr, L"Could not disable writing VBR tag\n");
+			return E_INVALIDARG;
+		}
+		lame_mp3_tags_fid(gfp, 0);
+		if(lame_init_params(gfp)) {
+			fwprintf(stderr, L"Could not init lame params\n");
+			return E_FAIL;
+		}
+
+		return RawSpStream::BindToFile(filename_, eMode, pFormatId, pWaveFormatEx, ullEventInterest_);
+	}
+
+	STDMETHODIMP Close() {
+		int r = lame_encode_flush(gfp, encodebuf, sizeof(encodebuf));
+		if(r < 0) return E_FAIL;
+		if(r == 0) return S_OK;
+		if(WriteFile(h, encodebuf, r, 0, 0)) return S_OK;
+
+		DWORD e = GetLastError();
+		WCHAR errbuf[MAX_PATH];
+		FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, 0, e, 0, errbuf, sizeof(errbuf) / sizeof(errbuf[0]), 0);
+		fwprintf(stderr, L"Could not write audio samples to %s: %d (%s)", isStdout ? L"stdout" : filename, e, errbuf);
+		return HRESULT_FROM_WIN32(e);
+
+		lame_close(gfp);
+		return RawSpStream::Close();
+	}
+
+	HRESULT STDMETHODCALLTYPE Write(const void *buf, ULONG size, ULONG *newPos) {
+		if(size >= 16777216) {
+			return E_INVALIDARG;
+		}
+		ULONG nSamples = size * 8 / wfex.wBitsPerSample / wfex.nChannels;
+		ULONG framesize = 1152;
+		for(ULONG s = 0; s < nSamples; s += framesize) {
+			ULONG samples = nSamples - s;
+			if(samples > framesize) samples = framesize;
+			int r;
+			if(wfex.nChannels > 1)
+				r = lame_encode_buffer_interleaved(gfp, ((short *)buf) + s * wfex.nChannels, samples, encodebuf, sizeof(encodebuf));
+			else
+				r = lame_encode_buffer(gfp, ((short *)buf) + s, 0, samples, encodebuf, sizeof(encodebuf));
+			if(r < 0) return E_FAIL;
+
+			if(r == 0) continue;
+			if(WriteFile(h, encodebuf, r, newPos, 0)) continue;
+
+			DWORD e = GetLastError();
+			WCHAR errbuf[MAX_PATH];
+			FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, 0, e, 0, errbuf, sizeof(errbuf) / sizeof(errbuf[0]), 0);
+			fwprintf(stderr, L"Could not write audio samples to %s: %d (%s)", isStdout ? L"stdout" : filename, e, errbuf);
+			return HRESULT_FROM_WIN32(e);
+		}
+
+		return S_OK;
+	}
+};
+
 int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, int rate, int volume, DWORD speakFlags, DWORD samplesPerSec, WORD bitsPerSample, WORD nChannels, ULONGLONG ullEventInterest) {
 	HRESULT hr;
 
@@ -924,10 +1024,12 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 		if(wavFilename && wavFilename[0]) {
 			size_t s = wcslen(wavFilename);
 			if(s >= 4) {
-				if(!_wcsicmp(wavFilename + s - 4, L".ogg"))
-					outType = 3;
-				else if(!_wcsicmp(wavFilename + s - 4, L".wav"))
+				if(!_wcsicmp(wavFilename + s - 4, L".wav"))
 					outType = 2;
+				else if(!_wcsicmp(wavFilename + s - 4, L".ogg"))
+					outType = 3;
+				else if(!_wcsicmp(wavFilename + s - 4, L".mp3"))
+					outType = 5;
 			}
 		}
 	}
@@ -973,7 +1075,6 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 	}
 
 	ISpStream *outputStream = 0;
-
 	if(outType == 1) {
 		outputStream = new RawSpStream();
 	} else if(outType == 2) {
@@ -986,6 +1087,8 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 		outputStream = new OggVorbisSpStream();
 	} else if(outType == 4) {
 		outputStream = new OggOpusSpStream();
+	} else if(outType == 5) {
+		outputStream = new Mp3SpStream();
 	} else {
 		fwprintf(stderr, L"Invalid output type %d\n", outType);
 		return E_INVALIDARG;
@@ -1101,6 +1204,8 @@ int wmain(int argc, WCHAR *argv[]) {
 					outType = 3;
 				else if(!_wcsicmp(optarg, L"ogg+opus"))
 					outType = 4;
+				else if(!_wcsicmp(optarg, L"mp3"))
+					outType = 5;
 				else
 					help = 1;
 				break;
@@ -1158,19 +1263,18 @@ int wmain(int argc, WCHAR *argv[]) {
 			L"                                  `wav' for RIFF .wav\n"
 			L"                                  `ogg' or `ogg+vorbis' for Ogg Vorbis\n"
 			L"                                  `ogg+opus' for Ogg Opus\n"
+			L"                                  `mp3' for MP3\n"
 			L"                                  `raw' for raw PCM samples\n"
 			L"                                  `auto' to autodetect from file extension\n"
 			L"  -v, --voice=VOICE               Select voice.\n"
-			L"  -t, --type=TYPE                 Input text type (PLAIN,SSML,SAPI,AUTO).\n"
 			L"  -r, --rate=RATE                 Rate (speed) of speech, from -10 to 10.\n"
+			L"  -t, --type=TYPE                 Input text type (PLAIN,SSML,SAPI,AUTO).\n"
 			L"  -V, --volume=VOL                Volume of speech, from 0 to 100.\n"
-			L"                                  By default, events are logged into the\n"
-			L"                                  output stream if it is a .wav or an .ogg\n"
 			L"  -s, --sample-rate=HZ            Sample rate of output. Default 22050.\n"
 			L"  -b, --bits=BITS                 Bit depth of output. Default 16.\n"
 			L"  -c, --channels=CHANNELS         Number of audio channels of output. Default 1.\n"
 			L"  -e, --events=MASK               Select events that are output.\n"
-			L"                                  Possible values:\n"
+			L"                                  Possible values, bitwise ORed:\n"
 			L"                                  Stream start      2\n"
 			L"                                  Stream end        4\n"
 			L"                                  Voice change      8\n"
@@ -1180,7 +1284,12 @@ int wmain(int argc, WCHAR *argv[]) {
 			L"                                  Sentence boundary 128\n"
 			L"                                  Viseme            256\n"
 			L"                                  Audio level       512\n"
-			L"                                  All TTS events    65534 or `all'\n",
+			L"                                  All TTS events    65534 or `all'\n"
+			L"                                  By default, events are logged into the\n"
+			L"                                  output stream if it is a .wav or an .ogg.\n"
+			L"                                  If output is stdout (`-'), and the event mask\n"
+			L"                                  is non zero, events are output on\n"
+			L"                                  file descriptor 3.\n",
 			argv[0]
 		);
 		return 1;

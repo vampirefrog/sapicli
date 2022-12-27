@@ -160,12 +160,12 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\lame\include;$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Debug\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis_static.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\Debug\opus.lib</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\lame\output\Debug\libmp3lame-static.lib;$(SolutionDir)..\lame\output\Debug\libmpghip-static.lib;$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Debug\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis_static.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\Debug\opus.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugDynamic|Win32'">
@@ -174,12 +174,12 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\lame\include;$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\DebugDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\DebugDLL\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\lame\output\Debug\libmp3lame.lib;$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\DebugDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\DebugDLL\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseStatic|Win32'">
@@ -190,14 +190,14 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\lame\include;$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Release\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis_static.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\Release\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\lame\output\Release\libmp3lame-static.lib;$(SolutionDir)..\lame\output\Release\libmpghip-static.lib;$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Release\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis_static.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\Release\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDynamic|Win32'">
@@ -208,14 +208,14 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\lame\include;$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\ReleaseDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\ReleaseDLL\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\lame\output\Release\libmp3lame.lib;$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\ReleaseDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\ReleaseDLL\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugStatic|x64'">
@@ -224,12 +224,12 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\lame\include;$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Debug\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis_static.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\Debug\opus.lib</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\lame\vc_solution\x64\Debug\libmp3lame-static.lib;$(SolutionDir)..\lame\vc_solution\x64\Debug\libmpghip-static.lib;$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Debug\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis_static.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\Debug\opus.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugDynamic|x64'">
@@ -238,12 +238,12 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\lame\include;$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\DebugDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\DebugDLL\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\lame\vc_solution\x64\Debug\libmp3lame.lib;$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\DebugDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Debug\libvorbis.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\DebugDLL\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseStatic|x64'">
@@ -254,14 +254,14 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\lame\include;$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Release\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis_static.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\Release\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\lame\vc_solution\x64\Release\libmp3lame-static.lib;$(SolutionDir)..\lame\vc_solution\x64\Release\libmpghip-static.lib;$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\Release\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis_static.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\Release\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDynamic|x64'">
@@ -272,14 +272,14 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\lame\include;$(SolutionDir)..\libogg\include;$(SolutionDir)..\libvorbis\include;$(SolutionDir)..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\ReleaseDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\ReleaseDLL\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)..\lame\vc_solution\x64\Release\libmp3lame.lib;$(SolutionDir)..\libogg\win32\VS2015\$(PlatformName)\ReleaseDLL\libogg.lib;$(SolutionDir)..\libvorbis\win32\VS2010\$(PlatformName)\Release\libvorbis.lib;$(SolutionDir)..\opus\win32\VS2015\$(PlatformName)\ReleaseDLL\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
