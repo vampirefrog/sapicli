@@ -920,6 +920,10 @@ public:
 	Mp3SpStream(): eh(0), gfp(0) {}
 
 	virtual STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
+		if(pWaveFormatEx->wBitsPerSample != 16) {
+			fwprintf(stderr, L"Only 16 bit samples are supported for mp3, got %d\n", pWaveFormatEx->wBitsPerSample);
+			return E_INVALIDARG;
+		}
 		gfp = lame_init();
 		if(!gfp) {
 			fwprintf(stderr, L"Could not init lame encoder\n");
