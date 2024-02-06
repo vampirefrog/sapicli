@@ -208,10 +208,12 @@ public:
 	WAVEFORMATEX wfex;
 	const GUID *formatId;
 	ULONGLONG ullEventInterest;
+	BOOL multiplex;
 	HANDLE h;
 	BOOL isStdout;
+	HANDLE eh; // events file handle
 
-	BaseSpStream() {}
+	BaseSpStream(BOOL multiplex_): filename(0), wfex{0} , formatId(0), ullEventInterest(0), multiplex(multiplex_), h(0), isStdout(0), eh(0) {}
 
 	STDMETHODIMP QueryInterface(REFIID riid, void **ppv) {
 		if(ppv == NULL) return E_INVALIDARG;
@@ -226,7 +228,6 @@ public:
 	STDMETHODIMP_(ULONG) AddRef(void) { return 1; }
 	STDMETHODIMP_(ULONG) Release(void) { return 1; }
 	STDMETHODIMP Read(void *, ULONG, ULONG *) { return 0; }
-	virtual STDMETHODIMP Write(const void *buf, ULONG size, ULONG *newPos) = 0;
 	STDMETHODIMP Seek(LARGE_INTEGER dlibMove, DWORD dwOrigin, ULARGE_INTEGER *plibNewPosition) {
 		if(plibNewPosition)
 			plibNewPosition->QuadPart = dlibMove.QuadPart;
@@ -247,7 +248,7 @@ public:
 		*format = pwfex;
 		return S_OK;
 	}
-	virtual STDMETHODIMP writeEventData(void *buf, size_t sz) = 0;
+
 	// FIXME: optimize by not allocating every time
 	STDMETHODIMP writeSpEvent(const SPEVENT *ev) {
 		CSpEvent cspev;
@@ -259,6 +260,7 @@ public:
 		delete[] buf;
 		return S_OK;
 	}
+
 	STDMETHODIMP AddEvents(const SPEVENT *pEventArray, ULONG ulCount) {
 		for(ULONG i = 0; i < ulCount; i++) {
 			const SPEVENT *ev = &pEventArray[i];
@@ -266,6 +268,7 @@ public:
 		}
 		return S_OK;
 	}
+
 	STDMETHODIMP GetEventInterest(ULONGLONG *pullEventInterest) {
 		*pullEventInterest = ullEventInterest;
 		return S_OK;
@@ -298,6 +301,17 @@ public:
 			}
 		}
 
+		if(ullEventInterest_) {
+			if(multiplex) {
+				eh = h;
+			} else if(isStdout) {
+				eh = (HANDLE)_get_osfhandle(3);
+			} else {
+				fwprintf(stderr, L"Cannot select events (0x%04llx) when output is not stdout and multiplexing is not enabled\n", ullEventInterest_);
+				return E_INVALIDARG;
+			}
+		}
+
 		return S_OK;
 	}
 
@@ -313,33 +327,25 @@ public:
 		fwprintf(stderr, L"Could not close \"%s\": %d (%s)", filename, e, buf);
 		return HRESULT_FROM_WIN32(e);
 	}
-};
 
-class RawSpStream: public BaseSpStream {
-public:
-	HANDLE eh; // events file handle
-
-	RawSpStream(): eh(0) {}
-
-	virtual STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
-		isStdout = filename_ && filename_[0] == '-' && filename_[1] == 0;
-		if(ullEventInterest_) {
-			if(isStdout) {
-				eh = (HANDLE)_get_osfhandle(3);
-			} else {
-				fwprintf(stderr, L"Cannot select events (0x%04llx) when output is not stdout\n", ullEventInterest_);
-				return E_INVALIDARG;
-			}
+	STDMETHODIMP_(BOOL) MuxWrite(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, LPDWORD lpNumberOfBytesWritten, BOOL isEventData) {
+		wprintf(L"MuxWrite %d\n", nNumberOfBytesToWrite);
+		if (!multiplex) return WriteFile(hFile, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, 0);
+		DWORD muxme = nNumberOfBytesToWrite << 1 | (isEventData ? 0x01 : 0x00);
+		CHAR buf[4];
+		int bufsize;
+		for(bufsize = 0; muxme > 0; muxme >>= 7, bufsize++) {
+			buf[bufsize] = muxme & 0x7f;
+			if (bufsize > 0) buf[bufsize - 1] |= 0x80;
 		}
 
-		HRESULT hr = BaseSpStream::BindToFile(filename_, eMode, pFormatId, pWaveFormatEx, ullEventInterest_);
-		if(FAILED(hr)) return hr;
-
-		return S_OK;
+		BOOL b = WriteFile(hFile, buf, bufsize, lpNumberOfBytesWritten, 0);
+		if(!b) return b;
+		return WriteFile(hFile, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, 0);
 	}
 
-	HRESULT STDMETHODCALLTYPE Write(const void *buf, ULONG size, ULONG *newPos) {
-		BOOL r = WriteFile(h, buf, size, newPos, 0);
+	virtual HRESULT STDMETHODCALLTYPE Write(const void *buf, ULONG size, ULONG *newPos) {
+		BOOL r = MuxWrite(h, buf, size, newPos, FALSE);
 		if(r) return S_OK;
 
 		DWORD e = GetLastError();
@@ -349,9 +355,9 @@ public:
 		return HRESULT_FROM_WIN32(e);
 	}
 
-	STDMETHODIMP writeEventData(void *buf, size_t sz) {
+	virtual STDMETHODIMP writeEventData(void *buf, size_t sz) {
 		if(!eh) return E_FAIL;
-		BOOL b = WriteFile(eh, buf, (ULONG)sz, 0, 0);
+		BOOL b = MuxWrite(eh, buf, (ULONG)sz, 0, TRUE);
 		if(b) return S_OK;
 
 		DWORD e = GetLastError();
@@ -362,6 +368,11 @@ public:
 	}
 };
 
+class RawSpStream: public BaseSpStream {
+public:
+	RawSpStream(BOOL multiplex): BaseSpStream(multiplex) {}
+};
+
 class OggSpStream: public BaseSpStream {
 public:
 	ogg_stream_state ogg_voice_st;
@@ -369,7 +380,7 @@ public:
 	ogg_int64_t granulepos;
 	ogg_int64_t packetNo, eventpacketNo;
 
-	OggSpStream(): granulepos(0), packetNo(0), eventpacketNo(0) {}
+	OggSpStream(BOOL multiplex): BaseSpStream(multiplex), granulepos(0), packetNo(0), eventpacketNo(0) {}
 
 	virtual STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
 		if(ogg_stream_init(&ogg_voice_st, 1)) {
@@ -414,7 +425,7 @@ public:
 
 	STDMETHODIMP writeEventData(void *buf, size_t sz) {
 		if(ullEventInterest == 0) return S_OK;
-
+		if(!multiplex) return BaseSpStream::writeEventData(buf, sz);
 		ogg_packet p;
 		p.packet = (unsigned char *)buf;
 		p.bytes = (ULONG)sz;
@@ -432,6 +443,7 @@ public:
 
 	STDMETHODIMP flushEventStream(void) {
 		if(ullEventInterest == 0) return S_OK;
+		if(!multiplex) return S_OK;
 
 		ogg_packet p;
 		p.packet = 0;
@@ -511,7 +523,7 @@ public:
 	vorbis_dsp_state vd;
 	vorbis_block vb;
 
-	OggVorbisSpStream() {}
+	OggVorbisSpStream(BOOL multiplex): OggSpStream(multiplex), vi{0}, vc{0}, vd{0}, vb{0} {}
 
 	const WCHAR *getVorbisErrorString(int r) {
 		switch(r) {
@@ -708,7 +720,7 @@ public:
 	int framepos;
 	int framesize;
 
-	OggOpusSpStream(): enc(0), framepos(0), framesize(960) {}
+	OggOpusSpStream(BOOL multiplex): OggSpStream(multiplex), enc(0), frame{0}, framepos(0), framesize(960) {}
 
 	const WCHAR *getOpusErrorString(int err) {
 		switch(err) {
@@ -911,13 +923,12 @@ public:
 	}
 };
 
-class Mp3SpStream: public RawSpStream {
+class Mp3SpStream: public BaseSpStream {
 public:
-	HANDLE eh; // events file handle
 	lame_global_flags *gfp;
 	unsigned char encodebuf[16384];
 
-	Mp3SpStream(): eh(0), gfp(0) {}
+	Mp3SpStream(BOOL multiplex): BaseSpStream(multiplex), gfp(0), encodebuf{0} {}
 
 	virtual STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
 		if(pWaveFormatEx->wBitsPerSample != 16) {
@@ -960,14 +971,14 @@ public:
 			return E_FAIL;
 		}
 
-		return RawSpStream::BindToFile(filename_, eMode, pFormatId, pWaveFormatEx, ullEventInterest_);
+		return BaseSpStream::BindToFile(filename_, eMode, pFormatId, pWaveFormatEx, ullEventInterest_);
 	}
 
 	STDMETHODIMP Close() {
 		int r = lame_encode_flush(gfp, encodebuf, sizeof(encodebuf));
 		if(r < 0) return E_FAIL;
 		if(r == 0) return S_OK;
-		if(WriteFile(h, encodebuf, r, 0, 0)) return S_OK;
+		if(MuxWrite(h, encodebuf, r, 0, FALSE)) return S_OK;
 
 		DWORD e = GetLastError();
 		WCHAR errbuf[MAX_PATH];
@@ -976,7 +987,7 @@ public:
 		return HRESULT_FROM_WIN32(e);
 
 		lame_close(gfp);
-		return RawSpStream::Close();
+		return BaseSpStream::Close();
 	}
 
 	HRESULT STDMETHODCALLTYPE Write(const void *buf, ULONG size, ULONG *newPos) {
@@ -996,7 +1007,7 @@ public:
 			if(r < 0) return E_FAIL;
 
 			if(r == 0) continue;
-			if(WriteFile(h, encodebuf, r, newPos, 0)) continue;
+			if(MuxWrite(h, encodebuf, r, newPos, FALSE)) continue;
 
 			DWORD e = GetLastError();
 			WCHAR errbuf[MAX_PATH];
@@ -1009,7 +1020,7 @@ public:
 	}
 };
 
-int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, int rate, int volume, DWORD speakFlags, DWORD samplesPerSec, WORD bitsPerSample, WORD nChannels, ULONGLONG ullEventInterest) {
+int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, int rate, int volume, DWORD speakFlags, DWORD samplesPerSec, WORD bitsPerSample, WORD nChannels, ULONGLONG ullEventInterest, BOOL multiplex) {
 	HRESULT hr;
 
 	if(SP_IS_BAD_STRING_PTR(wavFilename)) {
@@ -1080,7 +1091,7 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 
 	ISpStream *outputStream = 0;
 	if(outType == 1) {
-		outputStream = new RawSpStream();
+		outputStream = new RawSpStream(multiplex);
 	} else if(outType == 2) {
 		HRESULT hr = ::CoCreateInstance(CLSID_SpStream, NULL, CLSCTX_ALL, __uuidof(outputStream), (void **)&outputStream);
 		if(FAILED(hr)) {
@@ -1088,11 +1099,11 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 			return 1;
 		}
 	} else if(outType == 3) {
-		outputStream = new OggVorbisSpStream();
+		outputStream = new OggVorbisSpStream(multiplex);
 	} else if(outType == 4) {
-		outputStream = new OggOpusSpStream();
+		outputStream = new OggOpusSpStream(multiplex);
 	} else if(outType == 5) {
-		outputStream = new Mp3SpStream();
+		outputStream = new Mp3SpStream(multiplex);
 	} else {
 		fwprintf(stderr, L"Invalid output type %d\n", outType);
 		return E_INVALIDARG;
@@ -1162,6 +1173,7 @@ int wmain(int argc, WCHAR *argv[]) {
 		{ L"bits", required_argument, 0, L'b' },
 		{ L"channels", required_argument, 0, L'c' },
 		{ L"events", required_argument, 0, L'e' },
+		{ L"multiplex", no_argument, 0, L'm' },
 		{ 0, 0, 0, 0 },
 	};
 
@@ -1176,11 +1188,12 @@ int wmain(int argc, WCHAR *argv[]) {
 	WORD bitsPerSample = 16, nChannels = 1;
 	ULONGLONG ullEventInterest = 0;
 	DWORD outType = 0;
+	BOOL multiplex = FALSE;
 
 	int option;
 	int option_index = 0;
 	while(1) {
-		option = getoptW_long(argc, argv, L"hlo:T:v:t:r:Vs:b:c:e:", long_options, &option_index);
+		option = getoptW_long(argc, argv, L"hlo:T:v:t:r:Vs:b:c:e:m", long_options, &option_index);
 		if(option == L'?') {
 			return 1;
 		}
@@ -1249,6 +1262,9 @@ int wmain(int argc, WCHAR *argv[]) {
 				else
 					ullEventInterest = wcstol(optarg, 0, 0);
 				break;
+			case L'm':
+				multiplex = TRUE;
+				break;
 		}
 	}
 
@@ -1293,7 +1309,9 @@ int wmain(int argc, WCHAR *argv[]) {
 			L"                                  output stream if it is a .wav or an .ogg.\n"
 			L"                                  If output is stdout (`-'), and the event mask\n"
 			L"                                  is non zero, events are output on\n"
-			L"                                  file descriptor 3.\n",
+			L"                                  file descriptor 3.\n"
+			L"  -m, --multiplex                 Multiplex audio and speech event data into the\n"
+			L"                                  same output. See README.md for how this works.\n",
 			argv[0]
 		);
 		return 1;
@@ -1309,7 +1327,7 @@ int wmain(int argc, WCHAR *argv[]) {
 	if(list) {
 		ret = listVoices();
 	} else {
-		ret = speakToWav(argv[optind], voice, wavFilename, outType, rate, volume, speakFlags, samplesPerSec, bitsPerSample, nChannels, ullEventInterest);
+		ret = speakToWav(argv[optind], voice, wavFilename, outType, rate, volume, speakFlags, samplesPerSec, bitsPerSample, nChannels, ullEventInterest, multiplex);
 	}
 
 	::CoUninitialize();
