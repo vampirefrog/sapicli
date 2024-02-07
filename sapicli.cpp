@@ -380,7 +380,7 @@ public:
 	ogg_int64_t granulepos;
 	ogg_int64_t packetNo, eventpacketNo;
 
-	OggSpStream(BOOL multiplex): BaseSpStream(multiplex), granulepos(0), packetNo(0), eventpacketNo(0) {}
+	OggSpStream(BOOL multiplex) : BaseSpStream(multiplex), ogg_voice_st{0}, ogg_events_st{0}, granulepos(0), packetNo(0), eventpacketNo(0) {}
 
 	virtual STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
 		if(ogg_stream_init(&ogg_voice_st, 1)) {
