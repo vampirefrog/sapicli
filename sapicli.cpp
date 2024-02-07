@@ -244,6 +244,7 @@ public:
 	STDMETHODIMP GetFormat(GUID *pguidFormatId, WAVEFORMATEX **format) {
 		*pguidFormatId = *formatId;
 		WAVEFORMATEX *pwfex = (WAVEFORMATEX *)::CoTaskMemAlloc(sizeof(WAVEFORMATEX));
+		if(!pwfex) return E_OUTOFMEMORY;
 		CopyMemory(pwfex, &wfex, sizeof(WAVEFORMATEX));
 		*format = pwfex;
 		return S_OK;
@@ -329,7 +330,6 @@ public:
 	}
 
 	STDMETHODIMP_(BOOL) MuxWrite(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, LPDWORD lpNumberOfBytesWritten, BOOL isEventData) {
-		wprintf(L"MuxWrite %d\n", nNumberOfBytesToWrite);
 		if (!multiplex) return WriteFile(hFile, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, 0);
 		DWORD muxme = nNumberOfBytesToWrite << 1 | (isEventData ? 0x01 : 0x00);
 		CHAR buf[4];
