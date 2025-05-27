@@ -105,3 +105,4 @@ case E_POINTER: return L"The ppv parameter is NULL.";
 case E_OUTOFMEMORY: return L"Out of memory.";
 case E_INVALIDARG: return L"Invalid argument.";
 case E_FAIL: return L"Failure";
+case E_ABORT: return L"Operation aborted";

@@ -283,12 +283,29 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="muxaudio\encoder.c" />
+    <ClCompile Include="muxaudio\mp3_encoder.c" />
+    <ClCompile Include="muxaudio\mux.c" />
+    <ClCompile Include="muxaudio\ogg_encoder.c" />
+    <ClCompile Include="muxaudio\ogg_opus_encoder.c" />
+    <ClCompile Include="muxaudio\ogg_vorbis_encoder.c" />
+    <ClCompile Include="muxaudio\raw_encoder.c" />
     <ClCompile Include="sapicli.cpp" />
     <ClCompile Include="getoptw.c" />
   </ItemGroup>
   <ItemGroup>
     <None Include="test.bat" />
     <None Include="zip.bat" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="muxaudio\encoder.h" />
+    <ClInclude Include="muxaudio\mp3_encoder.h" />
+    <ClInclude Include="muxaudio\mux.h" />
+    <ClInclude Include="muxaudio\ogg_encoder.h" />
+    <ClInclude Include="muxaudio\ogg_opus_encoder.h" />
+    <ClInclude Include="muxaudio\ogg_vorbis_encoder.h" />
+    <ClInclude Include="muxaudio\raw_encoder.h" />
+    <ClInclude Include="sapierr.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
