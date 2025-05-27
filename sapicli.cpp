@@ -204,11 +204,13 @@ int addLexemes() {
 	return 0;
 }
 
-static int write_cb(struct encoder* encoder, void* buf, int buf_size, void* data_ptr) {
+static int write_cb(struct encoder *encoder, void *buf, int buf_size, void *data_ptr) {
+	wprintf(L"write_cb %d\n", buf_size);
 	DWORD numberOfBytesWritten;
 	BOOL b = WriteFile((HANDLE)data_ptr, buf, buf_size, &numberOfBytesWritten, 0);
-	if(!b) return b;
-	return buf_size;
+	if(!b) return -1;
+	if(numberOfBytesWritten != buf_size) return -2;
+	return 0;
 }
 
 class MuxSpStream: public ISpStream, public ISpEventSink {
@@ -224,7 +226,7 @@ public:
 	HANDLE eh; // events file handle
 	struct encoder *encoder; // we allocate this below, depending on the format
 
-	MuxSpStream(LONG format_, BOOL multiplex_): filename(0), wfex{0} , formatId(0), ullEventInterest(0), format(format_), multiplex(multiplex_), h(0), isStdout(0), eh(0), encoder(0) {}
+	MuxSpStream(LONG format_, BOOL multiplex_): filename(0), wfex{ 0 }, formatId(0), ullEventInterest(0), format(format_), multiplex(multiplex_), h(0), isStdout(0), eh(0), encoder(0) {}
 
 	STDMETHODIMP QueryInterface(REFIID riid, void **ppv) {
 		if(ppv == NULL) return E_INVALIDARG;
@@ -236,22 +238,44 @@ public:
 		else return E_NOINTERFACE;
 		return S_OK;
 	}
-	STDMETHODIMP_(ULONG) AddRef(void) { return 1; }
-	STDMETHODIMP_(ULONG) Release(void) { return 1; }
-	STDMETHODIMP Read(void *, ULONG, ULONG *) { return 0; }
+	STDMETHODIMP_(ULONG) AddRef(void) {
+		return 1;
+	}
+	STDMETHODIMP_(ULONG) Release(void) {
+		return 1;
+	}
+	STDMETHODIMP Read(void *, ULONG, ULONG *) {
+		return 0;
+	}
 	STDMETHODIMP Seek(LARGE_INTEGER dlibMove, DWORD dwOrigin, ULARGE_INTEGER *plibNewPosition) {
 		if(plibNewPosition)
 			plibNewPosition->QuadPart = dlibMove.QuadPart;
 		return S_OK;
 	}
-	STDMETHODIMP SetSize(ULARGE_INTEGER) { return 0; }
-	STDMETHODIMP CopyTo(IStream *, ULARGE_INTEGER, ULARGE_INTEGER *, ULARGE_INTEGER *) { return 0; }
-	STDMETHODIMP Commit(DWORD) { return 0; }
-	STDMETHODIMP Revert(void) { return 0; }
-	STDMETHODIMP LockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) { return 0; }
-	STDMETHODIMP UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) { return 0; }
-	STDMETHODIMP Stat(STATSTG *, DWORD) { return 0; }
-	STDMETHODIMP Clone(IStream **) { return 0; }
+	STDMETHODIMP SetSize(ULARGE_INTEGER) {
+		return 0;
+	}
+	STDMETHODIMP CopyTo(IStream *, ULARGE_INTEGER, ULARGE_INTEGER *, ULARGE_INTEGER *) {
+		return 0;
+	}
+	STDMETHODIMP Commit(DWORD) {
+		return 0;
+	}
+	STDMETHODIMP Revert(void) {
+		return 0;
+	}
+	STDMETHODIMP LockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) {
+		return 0;
+	}
+	STDMETHODIMP UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) {
+		return 0;
+	}
+	STDMETHODIMP Stat(STATSTG *, DWORD) {
+		return 0;
+	}
+	STDMETHODIMP Clone(IStream **) {
+		return 0;
+	}
 	STDMETHODIMP GetFormat(GUID *pguidFormatId, WAVEFORMATEX **format) {
 		*pguidFormatId = *formatId;
 		WAVEFORMATEX *pwfex = (WAVEFORMATEX *)::CoTaskMemAlloc(sizeof(WAVEFORMATEX));
@@ -286,9 +310,13 @@ public:
 		return S_OK;
 	}
 
-	STDMETHODIMP SetBaseStream(IStream *pStream, REFGUID rguidFormat, const WAVEFORMATEX *pWaveFormatEx) { return S_OK; }
+	STDMETHODIMP SetBaseStream(IStream *pStream, REFGUID rguidFormat, const WAVEFORMATEX *pWaveFormatEx) {
+		return S_OK;
+	}
 
-	STDMETHODIMP GetBaseStream(IStream **ppStream) { return S_OK; }
+	STDMETHODIMP GetBaseStream(IStream **ppStream) {
+		return S_OK;
+	}
 
 	virtual STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
 		if(SP_IS_BAD_STRING_PTR(filename_) || eMode >= SPFM_NUM_MODES || SP_IS_BAD_OPTIONAL_READ_PTR(pFormatId))
@@ -324,23 +352,56 @@ public:
 			}
 		}
 
-		switch (format) {
+		int r;
+		switch(format) {
 			case 1:
 				encoder = (struct encoder *)new struct raw_encoder;
-				if (!encoder) return E_FAIL;
-				raw_encoder_init((raw_encoder *)encoder, multiplex, write_cb, h);
+				if(!encoder) {
+					fwprintf(stderr, L"Could not allocate raw_encoder\n");
+					return ERROR_OUTOFMEMORY;
+				}
+				r = raw_encoder_init((raw_encoder *)encoder, multiplex, write_cb, h);
+				if(r) {
+					fwprintf(stderr, L"Could not init raw encoder (0x%04x)\n", r);
+					return E_FAIL;
+				}
 				break;
 			case 3:
 				encoder = (struct encoder *)new struct ogg_vorbis_encoder;
-				ogg_vorbis_encoder_init((struct ogg_vorbis_encoder *)encoder, pWaveFormatEx->nSamplesPerSec, pWaveFormatEx->nChannels, pWaveFormatEx->wBitsPerSample, multiplex, write_cb, h);
+				if(!encoder) {
+					fwprintf(stderr, L"Could not allocate ogg_vorbis_encoder\n");
+					return ERROR_OUTOFMEMORY;
+				}
+				r = ogg_vorbis_encoder_init((struct ogg_vorbis_encoder *)encoder, pWaveFormatEx->nSamplesPerSec, pWaveFormatEx->nChannels, pWaveFormatEx->wBitsPerSample, multiplex, write_cb, h);
+				if(r) {
+					fwprintf(stderr, L"Could not init ogg vorbis encoder (0x%04x)\n", r);
+					return E_FAIL;
+				}
 				break;
 			case 4:
 				encoder = (struct encoder *)new struct ogg_opus_encoder;
-				ogg_opus_encoder_init((struct ogg_opus_encoder *)encoder, pWaveFormatEx->nSamplesPerSec, pWaveFormatEx->nChannels, pWaveFormatEx->wBitsPerSample, multiplex, write_cb, h);
+				if(!encoder) {
+					fwprintf(stderr, L"Could not allocate ogg_opus_encoder\n");
+					return ERROR_OUTOFMEMORY;
+				}
+				wprintf(L"samples=%d channels=%d\n", pWaveFormatEx->nSamplesPerSec, pWaveFormatEx->nChannels);
+				r = ogg_opus_encoder_init((struct ogg_opus_encoder *)encoder, pWaveFormatEx->nSamplesPerSec, pWaveFormatEx->nChannels, pWaveFormatEx->wBitsPerSample, multiplex, write_cb, h);
+				if(r) {
+					fwprintf(stderr, L"Could not init ogg opus encoder (0x%04x)\n", r);
+					return E_FAIL;
+				}
 				break;
 			case 5:
 				encoder = (struct encoder *)new struct mp3_encoder;
-				mp3_encoder_init((struct mp3_encoder *)encoder, pWaveFormatEx->nSamplesPerSec, pWaveFormatEx->nChannels, pWaveFormatEx->wBitsPerSample, multiplex, write_cb, h);
+				if(!encoder) {
+					fwprintf(stderr, L"Could not allocate mp3_encoder\n");
+					return ERROR_OUTOFMEMORY;
+				}
+				r = mp3_encoder_init((struct mp3_encoder *)encoder, pWaveFormatEx->nSamplesPerSec, pWaveFormatEx->nChannels, pWaveFormatEx->wBitsPerSample, multiplex, write_cb, h);
+				if(r) {
+					fwprintf(stderr, L"Could not init ogg vorbis encoder (0x%04x)\n", r);
+					return E_FAIL;
+				}
 				break;
 		}
 
@@ -350,26 +411,28 @@ public:
 	virtual STDMETHODIMP Close(void) {
 		if(isStdout || !h) return S_OK;
 
+		int r = encoder_finish(encoder);
+		if(r != 0) return E_FAIL;
+
 		BOOL b = CloseHandle(h);
 		if(b) return S_OK;
 
 		DWORD e = GetLastError();
 		WCHAR buf[MAX_PATH];
 		FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, 0, e, 0, buf, sizeof(buf) / sizeof(buf[0]), 0);
-		fwprintf(stderr, L"Could not close \"%s\": %d (%s)", filename, e, buf);
+		fwprintf(stderr, L"Could not close \"%s\": 0x%08x (%s)", filename, e, buf);
 		return HRESULT_FROM_WIN32(e);
 	}
 
 	virtual HRESULT STDMETHODCALLTYPE Write(const void *buf, ULONG size, ULONG *newPos) {
-		if(encoder_encode_samples(encoder, (void *)buf, size))
-			return E_FAIL;
-		return S_OK;
+		ULONG written = encoder_encode_samples(encoder, (void *)buf, size);
+		if(newPos) *newPos = written;
+		return written ? S_OK : E_FAIL;
 	}
 
-	virtual STDMETHODIMP writeEventData(void *buf, size_t sz) {
-		if(encoder_encode_data(encoder, buf, (int)sz))
-			return E_FAIL;
-		return S_OK;
+	virtual STDMETHODIMP writeEventData(void *buf, size_t size) {
+		ULONG written = encoder_encode_data(encoder, (void *)buf, size);
+		return written ? S_OK : E_FAIL;
 	}
 };
 
@@ -444,8 +507,8 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 
 	ISpStream *outputStream = 0;
 	if(outType == 2) {
-		HRESULT hr = ::CoCreateInstance(CLSID_SpStream, NULL, CLSCTX_ALL, __uuidof(outputStream), (void**)&outputStream);
-		if (FAILED(hr)) {
+		HRESULT hr = ::CoCreateInstance(CLSID_SpStream, NULL, CLSCTX_ALL, __uuidof(outputStream), (void **)&outputStream);
+		if(FAILED(hr)) {
 			fwprintf(stderr, L"Could not instantiate SpStream: %d %s\n", hr, getErrorString(hr));
 			return 1;
 		}
@@ -493,7 +556,7 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 
 	hr = outputStream->Close();
 	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not close %s: %d %s\n", wavFilename, hr, getErrorString(hr));
+		fwprintf(stderr, L"Could not close output stream \"%s\": 0x%08x %s\n", wavFilename, hr, getErrorString(hr));
 		return 1;
 	}
 
