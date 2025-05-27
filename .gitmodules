@@ -1,0 +1,3 @@
+[submodule "muxaudio"]
+	path = muxaudio
+	url = https://git.vampi.tech/vampi/muxaudio.git
