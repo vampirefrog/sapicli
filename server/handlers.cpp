@@ -29,7 +29,6 @@ void append_json_string_utf8(std::string& out, const std::wstring& s) {
             out.push_back(static_cast<char>(0xC0 | (wc >> 6)));
             out.push_back(static_cast<char>(0x80 | (wc & 0x3F)));
         } else {
-            // Surrogate pairs handled as separate code units; sufficient for SAPI strings.
             out.push_back(static_cast<char>(0xE0 | (wc >> 12)));
             out.push_back(static_cast<char>(0x80 | ((wc >> 6) & 0x3F)));
             out.push_back(static_cast<char>(0x80 | (wc & 0x3F)));
@@ -48,11 +47,10 @@ void append_pair(std::string& out, const char* key, const std::wstring& val, boo
 
 }  // namespace
 
-Response handle_voices() {
-    Response r;
+void handle_voices(StreamWriter& out) {
     try {
         auto voices = sapicli::enumerate_voices();
-        std::string& body = r.body;
+        std::string body;
         body.push_back('[');
         for (size_t i = 0; i < voices.size(); ++i) {
             if (i) body.push_back(',');
@@ -67,12 +65,15 @@ Response handle_voices() {
             body.push_back('}');
         }
         body.push_back(']');
+        out.start(200, "OK", "application/json; charset=utf-8");
+        out.write(body.data(), body.size());
+        out.finish();
     } catch (const std::exception& e) {
-        r.status = 500;
-        r.status_text = "Internal Server Error";
-        r.body = std::string("{\"error\":\"") + e.what() + "\"}";
+        std::string body = std::string("{\"error\":\"") + e.what() + "\"}";
+        out.start(500, "Internal Server Error", "application/json; charset=utf-8");
+        out.write(body.data(), body.size());
+        out.finish();
     }
-    return r;
 }
 
 }  // namespace sapisrv

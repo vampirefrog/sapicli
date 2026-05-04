@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -22,35 +23,86 @@ namespace {
 
 const HTTPAPI_VERSION kVersion = HTTPAPI_VERSION_2;
 
-void send_response(HANDLE queue, HTTP_REQUEST_ID req_id, const Response& resp) {
-    HTTP_RESPONSE r{};
-    r.StatusCode = static_cast<USHORT>(resp.status);
-    r.pReason = resp.status_text.c_str();
-    r.ReasonLength = static_cast<USHORT>(resp.status_text.size());
+// StreamWriter that sends an HTTP API v2 chunked response.
+// First write triggers HttpSendHttpResponse (headers + first chunk + MORE_DATA);
+// subsequent writes use HttpSendResponseEntityBody with MORE_DATA;
+// finish() sends a final empty body without MORE_DATA to close.
+class HttpStreamWriter final : public StreamWriter {
+public:
+    HttpStreamWriter(HANDLE queue, HTTP_REQUEST_ID req_id) : queue_(queue), req_id_(req_id) {}
 
-    r.Headers.KnownHeaders[HttpHeaderContentType].pRawValue = resp.content_type.c_str();
-    r.Headers.KnownHeaders[HttpHeaderContentType].RawValueLength =
-        static_cast<USHORT>(resp.content_type.size());
+    void start(int status, const char* status_text, const char* content_type) override {
+        status_ = status;
+        status_text_ = status_text;
+        content_type_ = content_type;
+    }
 
-    HTTP_DATA_CHUNK chunk{};
-    chunk.DataChunkType = HttpDataChunkFromMemory;
-    chunk.FromMemory.pBuffer = const_cast<char*>(resp.body.data());
-    chunk.FromMemory.BufferLength = static_cast<ULONG>(resp.body.size());
-    r.EntityChunkCount = 1;
-    r.pEntityChunks = &chunk;
+    void write(const void* data, std::size_t len) override {
+        if (!headers_sent_) {
+            send_headers_with_chunk(data, len);
+            headers_sent_ = true;
+            if (data && len) entity_open_ = true;
+        } else {
+            send_chunk(data, len);
+            if (len) entity_open_ = true;
+        }
+    }
 
-    ULONG sent = 0;
-    HttpSendHttpResponse(queue, req_id, 0, &r, nullptr, &sent, nullptr, 0, nullptr, nullptr);
-}
+    void finish() override {
+        if (!headers_sent_) {
+            send_headers_with_chunk(nullptr, 0);
+            headers_sent_ = true;
+        }
+        if (entity_open_) {
+            // Final call: no MORE_DATA flag → closes the response stream.
+            HttpSendResponseEntityBody(queue_, req_id_, 0, 0, nullptr, nullptr,
+                                       nullptr, 0, nullptr, nullptr);
+        }
+        finished_ = true;
+    }
 
-void send_simple(HANDLE queue, HTTP_REQUEST_ID req_id, int status, const char* text) {
-    Response r;
-    r.status = status;
-    r.status_text = text;
-    r.content_type = "text/plain; charset=utf-8";
-    r.body = text;
-    send_response(queue, req_id, r);
-}
+private:
+    void send_headers_with_chunk(const void* data, std::size_t len) {
+        HTTP_RESPONSE r{};
+        r.StatusCode = static_cast<USHORT>(status_);
+        r.pReason = status_text_.c_str();
+        r.ReasonLength = static_cast<USHORT>(status_text_.size());
+        r.Headers.KnownHeaders[HttpHeaderContentType].pRawValue = content_type_.c_str();
+        r.Headers.KnownHeaders[HttpHeaderContentType].RawValueLength =
+            static_cast<USHORT>(content_type_.size());
+
+        HTTP_DATA_CHUNK chunk{};
+        if (data && len) {
+            chunk.DataChunkType = HttpDataChunkFromMemory;
+            chunk.FromMemory.pBuffer = const_cast<void*>(data);
+            chunk.FromMemory.BufferLength = static_cast<ULONG>(len);
+            r.EntityChunkCount = 1;
+            r.pEntityChunks = &chunk;
+        }
+        ULONG sent = 0;
+        HttpSendHttpResponse(queue_, req_id_, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
+                             &r, nullptr, &sent, nullptr, 0, nullptr, nullptr);
+    }
+
+    void send_chunk(const void* data, std::size_t len) {
+        if (!data || !len) return;
+        HTTP_DATA_CHUNK chunk{};
+        chunk.DataChunkType = HttpDataChunkFromMemory;
+        chunk.FromMemory.pBuffer = const_cast<void*>(data);
+        chunk.FromMemory.BufferLength = static_cast<ULONG>(len);
+        HttpSendResponseEntityBody(queue_, req_id_, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
+                                   1, &chunk, nullptr, nullptr, 0, nullptr, nullptr);
+    }
+
+    HANDLE queue_;
+    HTTP_REQUEST_ID req_id_;
+    int status_ = 200;
+    std::string status_text_ = "OK";
+    std::string content_type_ = "application/octet-stream";
+    bool headers_sent_ = false;
+    bool entity_open_ = false;
+    bool finished_ = false;
+};
 
 bool path_equals(const HTTP_COOKED_URL& url, const wchar_t* p) {
     if (!url.pAbsPath) return false;
@@ -59,10 +111,27 @@ bool path_equals(const HTTP_COOKED_URL& url, const wchar_t* p) {
     return wcsncmp(url.pAbsPath, p, plen) == 0;
 }
 
+void send_simple(HANDLE queue, HTTP_REQUEST_ID req_id, int status, const char* text) {
+    HttpStreamWriter w(queue, req_id);
+    w.start(status, text, "text/plain; charset=utf-8");
+    w.write(text, strlen(text));
+    w.finish();
+}
+
 void dispatch(HANDLE queue, const HTTP_REQUEST* req) {
-    // Currently: GET /voices is the only handler.
     if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/voices")) {
-        send_response(queue, req->RequestId, handle_voices());
+        HttpStreamWriter w(queue, req->RequestId);
+        handle_voices(w);
+        return;
+    }
+    if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/synthesize")) {
+        HttpStreamWriter w(queue, req->RequestId);
+        std::wstring qs;
+        if (req->CookedUrl.pQueryString && req->CookedUrl.QueryStringLength) {
+            qs.assign(req->CookedUrl.pQueryString,
+                      req->CookedUrl.QueryStringLength / sizeof(wchar_t));
+        }
+        handle_synthesize(qs, w);
         return;
     }
     send_simple(queue, req->RequestId, 404, "Not Found");

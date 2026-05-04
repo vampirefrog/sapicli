@@ -82,6 +82,7 @@
     <ClCompile Include="server\service.cpp" />
     <ClCompile Include="server\http.cpp" />
     <ClCompile Include="server\handlers.cpp" />
+    <ClCompile Include="server\synthesize.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="server\service.h" />

@@ -188,6 +188,10 @@ void Synthesizer::speak(const std::wstring& text, SpeakMode mode) {
     HRESULT hr = impl_->voice->SetOutput(static_cast<ISpStreamFormat*>(&sink), FALSE);
     if (FAILED(hr)) throw_hr("ISpVoice::SetOutput", hr);
     hr = impl_->voice->Speak(text.c_str(), flags_for(mode), nullptr);
+    // Release ISpVoice's reference to our stack-allocated sink BEFORE it goes out
+    // of scope. Otherwise the voice still points at a dead stack object and
+    // crashes on next teardown. Do this even if Speak failed.
+    impl_->voice->SetOutput(nullptr, FALSE);
     if (FAILED(hr)) throw_hr("ISpVoice::Speak", hr);
 }
 
@@ -203,8 +207,9 @@ void Synthesizer::speak_to_wav_file(const std::wstring& filename, const std::wst
     hr = impl_->voice->SetOutput(stream, FALSE);
     if (FAILED(hr)) throw_hr("ISpVoice::SetOutput", hr);
     hr = impl_->voice->Speak(text.c_str(), flags_for(mode), nullptr);
-    if (FAILED(hr)) throw_hr("ISpVoice::Speak", hr);
+    impl_->voice->SetOutput(nullptr, FALSE);
     stream->Close();
+    if (FAILED(hr)) throw_hr("ISpVoice::Speak", hr);
 }
 
 }  // namespace sapicli
