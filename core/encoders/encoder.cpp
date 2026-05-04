@@ -24,13 +24,13 @@ mux_codec_type to_mux_codec(Format f) {
 class MuxAudioEncoder : public Encoder {
 public:
     MuxAudioEncoder(const EncoderOptions& opts, ByteSink sink)
-        : sink_(std::move(sink)), codec_(to_mux_codec(opts.format)) {
+        : sink_(std::move(sink)) {
         // num_streams=2 enables the side-channel for events; per the muxaudio
         // support table this routes vorbis/opus through ogg-with-parallel-stream
         // and mp3/pcm through the leb128 mux protocol. num_streams=1 emits
         // plain audio (regular .ogg / .mp3) with no event channel.
         int num_streams = opts.multiplex_events ? 2 : 1;
-        enc_ = mux_encoder_new(codec_,
+        enc_ = mux_encoder_new(to_mux_codec(opts.format),
                                static_cast<int>(opts.audio.sample_rate),
                                opts.audio.channels,
                                num_streams,
@@ -43,22 +43,6 @@ public:
     }
 
     void write_audio(const void* pcm, std::size_t bytes) override {
-        // Workaround for muxaudio's fixed 8192-byte mp3_buffer: lame needs
-        // ~1.25*samples+7200 bytes of output, so 4-8KB SAPI chunks overflow.
-        // Cap per-encode at 1024 PCM bytes (≤512 samples mono / ≤256 stereo,
-        // both well under the safe ceiling). Other codecs accept any size.
-        // TODO: upstream a fix to muxaudio's codec_mp3.c so this isn't needed.
-        if (codec_ == MUX_CODEC_MP3) {
-            const std::uint8_t* p = static_cast<const std::uint8_t*>(pcm);
-            std::size_t remaining = bytes;
-            while (remaining > 0) {
-                std::size_t n = remaining < 1024 ? remaining : 1024;
-                push(p, n, MUX_STREAM_AUDIO);
-                p += n;
-                remaining -= n;
-            }
-            return;
-        }
         push(pcm, bytes, MUX_STREAM_AUDIO);
     }
 
@@ -124,7 +108,6 @@ private:
 
     mux_encoder* enc_ = nullptr;
     ByteSink sink_;
-    mux_codec_type codec_;
 };
 
 }  // namespace
