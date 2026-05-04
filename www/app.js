@@ -38,100 +38,94 @@ const CHARACTERS = {
 };
 
 // ---------------------------------------------------------------------------
-// Ogg parsing
+// muxaudio WASM decoder
 // ---------------------------------------------------------------------------
-// Walk Ogg pages, reassemble packets per logical bitstream, identify which
-// stream is our event channel by the BOS magic, and yield events with their
-// audio-sample offsets (granulepos on event packets = current audio sample
-// count when the event was emitted). The 4-byte "SIDE" magic is muxaudio's
-// convention for the side-channel BOS packet.
-const EVENT_MAGIC = 'SIDE';
+// We hand the entire response to muxaudio's mux_decoder which knows how to
+// demux ogg + side-channel for vorbis/opus. It returns audio packets as
+// Int16Array PCM and side-channel packets as raw Uint8Array (one
+// SPSERIALIZEDEVENT per packet, exactly what the server submitted).
+const MUX_CODEC = { pcm: 0, opus: 1, vorbis: 2, mp3: 4 };
+const MUX_STREAM_AUDIO = 0;
+const MUX_STREAM_SIDE  = 1;
 
-function parseOggEvents(buffer) {
-  const view = new DataView(buffer);
-  const bytes = new Uint8Array(buffer);
-  let pos = 0;
+let muxModule = null;
+async function getMuxModule() {
+  if (muxModule) return muxModule;
+  if (typeof window.createMuxAudioWasm !== 'function') {
+    throw new Error('muxaudio.js not loaded (createMuxAudioWasm undefined)');
+  }
+  muxModule = await window.createMuxAudioWasm();
+  return muxModule;
+}
 
-  const streams = new Map(); // serial → { isEvents, partial: Uint8Array, packets: [{data, granule}] }
-  const events = [];
-  let eventSerial = null;
+// Decode a complete muxed response in one shot. Returns
+// { audio: Int16Array (interleaved if stereo), events: Uint8Array[] }.
+async function decodeWithMuxaudio(codec, bytes) {
+  const m = await getMuxModule();
 
-  while (pos + 27 <= bytes.length) {
-    if (bytes[pos] !== 0x4f || bytes[pos+1] !== 0x67 || bytes[pos+2] !== 0x67 || bytes[pos+3] !== 0x53) {
-      // Not aligned on OggS — abort gracefully (audio decoder will get the bytes raw).
-      break;
-    }
-    const headerType = bytes[pos+5];
-    // 64-bit granulepos LE; we use the low 32 bits which is plenty for any single
-    // synthesis call (>2 hours @ 44.1kHz).
-    const granuleLo = view.getUint32(pos+6, true);
-    const serial = view.getUint32(pos+14, true);
-    const segCount = bytes[pos+26];
-    if (pos + 27 + segCount > bytes.length) break;
-    const segs = bytes.slice(pos+27, pos+27+segCount);
-    let payloadStart = pos + 27 + segCount;
+  const _new      = m.cwrap('mux_decoder_new',      'number', ['number','number','number','number']);
+  const _decode   = m.cwrap('mux_decoder_decode',   'number', ['number','number','number','number']);
+  const _read     = m.cwrap('mux_decoder_read',     'number', ['number','number','number','number','number']);
+  const _finalize = m.cwrap('mux_decoder_finalize', 'number', ['number']);
+  const _destroy  = m.cwrap('mux_decoder_destroy',  null,     ['number']);
 
-    let stream = streams.get(serial);
-    if (!stream) {
-      stream = { isEvents: false, partial: null, packetGranule: granuleLo };
-      streams.set(serial, stream);
-    }
+  const dec = _new(MUX_CODEC[codec], 2 /* num_streams: audio + side */, 0, 0);
+  if (!dec) throw new Error('mux_decoder_new failed');
 
-    let segOff = payloadStart;
-    let curBuf = stream.partial;
-    let curStart = segOff;
-    for (let i = 0; i < segCount; ++i) {
-      const len = segs[i];
-      segOff += len;
-      if (len < 255) {
-        // Packet ends here.
-        const packetBytes = bytes.slice(curStart, segOff);
-        const data = curBuf
-          ? concat(curBuf, packetBytes)
-          : packetBytes;
-        curBuf = null;
-        curStart = segOff;
-        // Identify event stream by first packet content.
-        if (eventSerial === null && startsWithMagic(data, EVENT_MAGIC)) {
-          eventSerial = serial;
-          stream.isEvents = true;
-          continue; // BOS magic packet itself isn't an event payload
-        }
-        if (stream.isEvents) {
-          // granulepos is recorded against the LAST packet that ends on this page
-          // — which is the convention we use server-side.
-          events.push({ data, granule: granuleLo });
+  const audioChunks = [];
+  const eventBlobs  = [];
+  const READ_BUF = 256 * 1024;
+  const outPtr     = m._malloc(READ_BUF);
+  const writtenPtr = m._malloc(8);
+  const stPtr      = m._malloc(4);
+
+  function drain() {
+    for (;;) {
+      const r = _read(dec, outPtr, READ_BUF, writtenPtr, stPtr);
+      // 32-bit read of size_t low half is safe — no single drain returns >4GB.
+      const written = m.HEAPU32[writtenPtr >> 2];
+      if (written > 0) {
+        const st = m.HEAP32[stPtr >> 2];
+        if (st === MUX_STREAM_AUDIO) {
+          // PCM is int16. Copy out (slice() detaches from HEAP).
+          const samples = written >> 1;
+          audioChunks.push(new Int16Array(m.HEAP16.buffer, outPtr, samples).slice());
+        } else {
+          eventBlobs.push(m.HEAPU8.slice(outPtr, outPtr + written));
         }
       }
-      // (255-len segments continue into the next segment; accumulate via curBuf)
+      // -4 AGAIN: nothing more right now. -6 EOF: end of stream. else error.
+      if (r === -4 || r === -6) return r;
+      if (r < 0) throw new Error(`mux_decoder_read failed: ${r}`);
+      if (written === 0) return 0;
     }
-    if (curStart < segOff) {
-      // Trailing segment(s) carried over to the next page.
-      const tail = bytes.slice(curStart, segOff);
-      stream.partial = curBuf ? concat(curBuf, tail) : tail;
-    } else {
-      stream.partial = null;
-    }
-
-    pos = payloadStart;
-    for (let i = 0; i < segCount; ++i) pos += segs[i];
   }
-  return events;
-}
 
-function concat(a, b) {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
-}
-
-function startsWithMagic(buf, magic) {
-  if (buf.length < magic.length) return false;
-  for (let i = 0; i < magic.length; ++i) {
-    if (buf[i] !== magic.charCodeAt(i)) return false;
+  // Feed all input. The wrapper's max chunk is 4MB; our responses are well under.
+  const inPtr      = m._malloc(bytes.length);
+  m.HEAPU8.set(bytes, inPtr);
+  const consumedPtr = m._malloc(8);
+  const dr = _decode(dec, inPtr, bytes.length, consumedPtr);
+  if (dr < 0 && dr !== -6) {
+    m._free(inPtr); m._free(consumedPtr); m._free(outPtr); m._free(writtenPtr); m._free(stPtr);
+    _destroy(dec);
+    throw new Error(`mux_decoder_decode failed: ${dr}`);
   }
-  return true;
+  m._free(inPtr); m._free(consumedPtr);
+  drain();
+
+  _finalize(dec);
+  drain();
+
+  m._free(outPtr); m._free(writtenPtr); m._free(stPtr);
+  _destroy(dec);
+
+  // Concatenate audio chunks.
+  const totalSamples = audioChunks.reduce((s, c) => s + c.length, 0);
+  const audio = new Int16Array(totalSamples);
+  let off = 0;
+  for (const c of audioChunks) { audio.set(c, off); off += c.length; }
+  return { audio, events: eventBlobs };
 }
 
 // SPSERIALIZEDEVENT: 24 bytes
@@ -232,13 +226,22 @@ function getAudio() {
 }
 
 async function speak(opts) {
-  const { text, voice, format, rate, volume, apiKey, character, status, puppet, bubble } = opts;
+  const { text, voice, format, rate, volume, apiKey, status, puppet, bubble } = opts;
   status.textContent = 'requesting…';
+
+  // Format → muxaudio codec name + per-codec sample rate. Opus only accepts
+  // 8/12/16/24/48 kHz, so the server snaps requests to 24000 for opus; the
+  // decoder outputs PCM at whatever rate the codec used.
+  let codec, sampleRate;
+  if (format === 'ogg' || format === 'ogg+vorbis') { codec = 'vorbis'; sampleRate = 22050; }
+  else if (format === 'ogg+opus')                  { codec = 'opus';   sampleRate = 24000; }
+  else if (format === 'mp3')                       { codec = 'mp3';    sampleRate = 22050; }
+  else { status.textContent = `unsupported format: ${format}`; return; }
 
   const params = new URLSearchParams({
     text, format, rate, volume,
     events: 'all', multiplex: 'true',
-    sample_rate: '22050', channels: '1', bits: '16',
+    sample_rate: String(sampleRate), channels: '1', bits: '16',
   });
   if (voice) params.set('voice', voice);
 
@@ -258,35 +261,38 @@ async function speak(opts) {
 
   status.textContent = 'downloading…';
   const arrayBuf = await resp.arrayBuffer();
+  const inputBytes = new Uint8Array(arrayBuf);
 
-  status.textContent = 'decoding…';
+  status.textContent = 'decoding (muxaudio wasm)…';
+  let decoded;
+  try {
+    decoded = await decodeWithMuxaudio(codec, inputBytes);
+  } catch (e) {
+    status.textContent = 'mux decode failed: ' + e.message;
+    return;
+  }
+  const { audio, events: eventBlobs } = decoded;
+
   const ctx = getAudio();
   if (ctx.state === 'suspended') await ctx.resume();
 
-  // Native audio decode of the multiplexed Ogg. Most browsers' vorbis/opus
-  // decoders happily ignore unknown logical streams in the same container.
-  let audioBuf;
-  try {
-    audioBuf = await ctx.decodeAudioData(arrayBuf.slice(0));
-  } catch (e) {
-    status.textContent = 'decode failed (browser may not support this format): ' + e;
+  // Build an AudioBuffer from the decoded PCM (mono, int16 → float32).
+  if (audio.length === 0) {
+    status.textContent = `decoded 0 audio samples (${eventBlobs.length} events)`;
     return;
   }
+  const audioBuf = ctx.createBuffer(1, audio.length, sampleRate);
+  const ch = audioBuf.getChannelData(0);
+  for (let i = 0; i < audio.length; ++i) ch[i] = audio[i] / 32768;
 
-  // Extract event packets from the multiplexed Ogg.
-  const eventPackets = (format === 'ogg' || format === 'ogg+opus')
-    ? parseOggEvents(arrayBuf)
-    : [];
-  const decodedEvents = eventPackets
-    .map(p => Object.assign(decodeEvent(p.data) ?? {}, { granule: p.granule }))
-    .filter(e => e.eventId !== undefined);
+  const decodedEvents = eventBlobs
+    .map(decodeEvent)
+    .filter(e => e !== null);
 
-  // Event timing: use the per-event SPSERIALIZEDEVENT.ullAudioStreamOffset
-  // (bytes into the source PCM stream). Ogg granulepos is page-level, so
-  // events that share a page would all collapse to the same granule —
-  // audioOffsetBytes is per-event and always correct. Source is what we
-  // requested below: 22050 Hz × 1 ch × 16 bit = 44100 bytes/sec.
-  const SOURCE_BYTES_PER_SECOND = 22050 * 1 * (16 / 8);
+  // Event timing: use SPSERIALIZEDEVENT.ullAudioStreamOffset (bytes into the
+  // source PCM stream that SAPI synthesized at). The server requests
+  // sample_rate × 1 channel × 2 bytes/sample.
+  const SOURCE_BYTES_PER_SECOND = sampleRate * 1 * 2;
 
   bubble.reset(text);
   status.textContent = `playing (${audioBuf.duration.toFixed(2)}s, ${decodedEvents.length} events)`;
@@ -297,7 +303,6 @@ async function speak(opts) {
   const startAt = ctx.currentTime + 0.05;
   src.start(startAt);
 
-  // Schedule events relative to startAt.
   for (const e of decodedEvents) {
     const tSec = e.audioOffsetBytes / SOURCE_BYTES_PER_SECOND;
     const fireAt = startAt + tSec;
