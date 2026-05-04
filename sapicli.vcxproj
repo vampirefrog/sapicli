@@ -82,6 +82,8 @@
   <ItemGroup>
     <ClCompile Include="sapicli.cpp" />
     <ClCompile Include="getoptw.c" />
+    <ClCompile Include="core\voices.cpp" />
+    <ClCompile Include="core\synth.cpp" />
     <ClCompile Include="core\encoders\encoder.cpp" />
     <ClCompile Include="core\encoders\ogg_vorbis.cpp" />
     <ClCompile Include="core\encoders\ogg_opus.cpp" />
@@ -90,6 +92,8 @@
   <ItemGroup>
     <ClInclude Include="getoptw.h" />
     <ClInclude Include="sapierr.h" />
+    <ClInclude Include="core\voices.h" />
+    <ClInclude Include="core\synth.h" />
     <ClInclude Include="core\encoders\encoder.h" />
     <ClInclude Include="core\encoders\ogg_vorbis.h" />
     <ClInclude Include="core\encoders\ogg_opus.h" />

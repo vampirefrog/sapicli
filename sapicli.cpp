@@ -15,6 +15,8 @@
 #include <fcntl.h>
 
 #include "core/encoders/encoder.h"
+#include "core/synth.h"
+#include "core/voices.h"
 #include <stdexcept>
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -57,89 +59,28 @@ void printJsonKeyPair(const WCHAR *key, const WCHAR *value, int skipComma = 0) {
 }
 
 int listVoices() {
-	HRESULT hr = 0L;
-
-	CComPtr<IEnumSpObjectTokens> voicesEnum;
-	hr = SpEnumTokens(SPCAT_VOICES, NULL, NULL, &voicesEnum);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not enumerate tokens: %d %s\n", hr, getErrorString(hr));
-		return 1;
-	}
-
-	ULONG ulCount = 0;
-	hr = voicesEnum->GetCount(&ulCount);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not get token count: %d %s\n", hr, getErrorString(hr));
+	std::vector<sapicli::VoiceInfo> voices;
+	try {
+		voices = sapicli::enumerate_voices();
+	} catch(const std::exception& e) {
+		fwprintf(stderr, L"Could not enumerate voices: %hs\n", e.what());
 		return 1;
 	}
 
 	wprintf(L"[\n");
-
-	while(ulCount--) {
-		CComPtr<ISpObjectToken> cpVoiceToken;
-		hr = voicesEnum->Next(1, &cpVoiceToken, NULL);
-		if(FAILED(hr)) {
-			fwprintf(stderr, L"Could not iterate voice token: %d %s\n", hr, getErrorString(hr));
-			return 1;
-		}
-
-		WCHAR *idString = 0L;
-		hr = cpVoiceToken->GetId(&idString);
-		if(FAILED(hr)) {
-			fwprintf(stderr, L"Could not get token ID: %d %s\n", hr, getErrorString(hr));
-			return 1;
-		}
+	for(size_t i = 0; i < voices.size(); i++) {
+		const auto& v = voices[i];
 		wprintf(L"{\n");
-		WCHAR *idBasename = 0L;
-		idBasename = wcsrchr(idString, '\\');
-		printJsonKeyPair(L"id", idBasename && idBasename[0] ? idBasename + 1 : idString);
-
-		WCHAR *descriptionString = 0L;
-		hr = SpGetDescription(cpVoiceToken, &descriptionString);
-		if(FAILED(hr)) {
-			fwprintf(stderr, L"Could not get token description: %d %s\n", hr, getErrorString(hr));
-			return 1;
-		}
-		printJsonKeyPair(L"description", descriptionString);
-
-		CComPtr<ISpDataKey> cpSpAttributesKey;
-		hr = cpVoiceToken->OpenKey(L"Attributes", &cpSpAttributesKey);
-		if(FAILED(hr)) {
-			fwprintf(stderr, L"Could not open attributes key: %d %s\n", hr, getErrorString(hr));
-			return 1;
-		}
-
-		WCHAR *age;
-		cpSpAttributesKey->GetStringValue(L"Age", &age);
-		printJsonKeyPair(L"age", age);
-
-		WCHAR *gender;
-		cpSpAttributesKey->GetStringValue(L"Gender", &gender);
-		printJsonKeyPair(L"gender", gender);
-
-		WCHAR *language;
-		cpSpAttributesKey->GetStringValue(L"Language", &language);
-		WCHAR strNameBuffer[LOCALE_NAME_MAX_LENGTH] = { 0 };
-		int langId = wcstol(language, NULL, 16);
-		LCIDToLocaleName(langId, strNameBuffer, LOCALE_NAME_MAX_LENGTH, 0);
-		printJsonKeyPair(L"language", strNameBuffer);
-
-		WCHAR *name;
-		cpSpAttributesKey->GetStringValue(L"Name", &name);
-		printJsonKeyPair(L"name", name);
-
-		WCHAR *vendor;
-		cpSpAttributesKey->GetStringValue(L"Vendor", &vendor);
-		printJsonKeyPair(L"vendor", vendor, 1);
-
-		if(ulCount > 0)
-			wprintf(L"},\n");
-		else
-			wprintf(L"}\n");
+		printJsonKeyPair(L"id", v.id.c_str());
+		printJsonKeyPair(L"description", v.description.c_str());
+		printJsonKeyPair(L"age", v.age.c_str());
+		printJsonKeyPair(L"gender", v.gender.c_str());
+		printJsonKeyPair(L"language", v.language.c_str());
+		printJsonKeyPair(L"name", v.name.c_str());
+		printJsonKeyPair(L"vendor", v.vendor.c_str(), 1);
+		wprintf(i + 1 < voices.size() ? L"},\n" : L"}\n");
 	}
-
 	wprintf(L"]\n");
-
 	return 0;
 }
 
@@ -201,246 +142,18 @@ int addLexemes() {
 	return 0;
 }
 
-class MuxSpStream: public ISpStream, public ISpEventSink {
-public:
-	LPCWSTR filename;
-	WAVEFORMATEX wfex;
-	const GUID *formatId;
-	ULONGLONG ullEventInterest;
-	LONG format;
-	BOOL multiplex;
-	HANDLE h;
-	BOOL isStdout;
-	HANDLE eh; // events file handle (used when not multiplexing into the encoder)
-	std::unique_ptr<sapicli::Encoder> encoder;
-
-	MuxSpStream(LONG format_, BOOL multiplex_): filename(0), wfex{ 0 }, formatId(0), ullEventInterest(0), format(format_), multiplex(multiplex_), h(0), isStdout(0), eh(0) {}
-
-	STDMETHODIMP QueryInterface(REFIID riid, void **ppv) {
-		if(ppv == NULL) return E_INVALIDARG;
-		*ppv = NULL;
-		if(riid == IID_IUnknown || riid == IID_ISequentialStream || riid == IID_IStream || riid == IID_ISpStreamFormat || riid == IID_ISpStream)
-			*ppv = static_cast<ISpStreamFormat *>(this);
-		else if(riid == IID_ISpEventSink)
-			*ppv = static_cast<ISpEventSink *>(this);
-		else return E_NOINTERFACE;
-		return S_OK;
-	}
-	STDMETHODIMP_(ULONG) AddRef(void) {
-		return 1;
-	}
-	STDMETHODIMP_(ULONG) Release(void) {
-		return 1;
-	}
-	STDMETHODIMP Read(void *, ULONG, ULONG *) {
-		return 0;
-	}
-	STDMETHODIMP Seek(LARGE_INTEGER dlibMove, DWORD dwOrigin, ULARGE_INTEGER *plibNewPosition) {
-		if(plibNewPosition)
-			plibNewPosition->QuadPart = dlibMove.QuadPart;
-		return S_OK;
-	}
-	STDMETHODIMP SetSize(ULARGE_INTEGER) {
-		return 0;
-	}
-	STDMETHODIMP CopyTo(IStream *, ULARGE_INTEGER, ULARGE_INTEGER *, ULARGE_INTEGER *) {
-		return 0;
-	}
-	STDMETHODIMP Commit(DWORD) {
-		return 0;
-	}
-	STDMETHODIMP Revert(void) {
-		return 0;
-	}
-	STDMETHODIMP LockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) {
-		return 0;
-	}
-	STDMETHODIMP UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) {
-		return 0;
-	}
-	STDMETHODIMP Stat(STATSTG *, DWORD) {
-		return 0;
-	}
-	STDMETHODIMP Clone(IStream **) {
-		return 0;
-	}
-	STDMETHODIMP GetFormat(GUID *pguidFormatId, WAVEFORMATEX **format) {
-		*pguidFormatId = *formatId;
-		WAVEFORMATEX *pwfex = (WAVEFORMATEX *)::CoTaskMemAlloc(sizeof(WAVEFORMATEX));
-		if(!pwfex) return E_OUTOFMEMORY;
-		CopyMemory(pwfex, &wfex, sizeof(WAVEFORMATEX));
-		*format = pwfex;
-		return S_OK;
-	}
-
-	// FIXME: optimize by not allocating every time
-	STDMETHODIMP writeSpEvent(const SPEVENT *ev) {
-		CSpEvent cspev;
-		cspev.CopyFrom(ev);
-		ULONG sz = cspev.SerializeSize<SPSERIALIZEDEVENT>();
-		BYTE *buf = new BYTE[sz];
-		cspev.Serialize<SPSERIALIZEDEVENT>((SPSERIALIZEDEVENT *)buf);
-		writeEventData(buf, sz);
-		delete[] buf;
-		return S_OK;
-	}
-
-	STDMETHODIMP AddEvents(const SPEVENT *pEventArray, ULONG ulCount) {
-		for(ULONG i = 0; i < ulCount; i++) {
-			const SPEVENT *ev = &pEventArray[i];
-			writeSpEvent(ev);
-		}
-		return S_OK;
-	}
-
-	STDMETHODIMP GetEventInterest(ULONGLONG *pullEventInterest) {
-		*pullEventInterest = ullEventInterest;
-		return S_OK;
-	}
-
-	STDMETHODIMP SetBaseStream(IStream *pStream, REFGUID rguidFormat, const WAVEFORMATEX *pWaveFormatEx) {
-		return S_OK;
-	}
-
-	STDMETHODIMP GetBaseStream(IStream **ppStream) {
-		return S_OK;
-	}
-
-	virtual STDMETHODIMP BindToFile(LPCWSTR filename_, SPFILEMODE eMode, const GUID *pFormatId, const WAVEFORMATEX *pWaveFormatEx, ULONGLONG ullEventInterest_) {
-		if(SP_IS_BAD_STRING_PTR(filename_) || eMode >= SPFM_NUM_MODES || SP_IS_BAD_OPTIONAL_READ_PTR(pFormatId))
-			return E_INVALIDARG;
-
-		filename = filename_;
-		ullEventInterest = ullEventInterest_;
-		formatId = pFormatId;
-		CopyMemory(&wfex, pWaveFormatEx, sizeof(WAVEFORMATEX));
-
-		isStdout = filename_ && filename_[0] == '-' && filename_[1] == 0;
-		if(isStdout) {
-			h = GetStdHandle(STD_OUTPUT_HANDLE);
-		} else {
-			h = CreateFileW(filename_, GENERIC_WRITE, FILE_SHARE_READ, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, 0);
-			if(h == INVALID_HANDLE_VALUE) {
-				DWORD e = GetLastError();
-				WCHAR buf[MAX_PATH];
-				FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, 0, e, 0, buf, sizeof(buf) / sizeof(buf[0]), 0);
-				fwprintf(stderr, L"Could not open \"%s\" for writing: %d %s\n", filename_, e, buf);
-				return HRESULT_FROM_WIN32(e);
-			}
-		}
-
-		bool encodes_events = multiplex && format != 1;
-		if(ullEventInterest_) {
-			if(encodes_events) {
-				eh = NULL;  // events handled by the encoder
-			} else if(isStdout) {
-				eh = (HANDLE)_get_osfhandle(3);
-			} else {
-				fwprintf(stderr, L"Cannot select events (0x%04llx) when output is not stdout and multiplexing is not enabled\n", ullEventInterest_);
-				return E_INVALIDARG;
-			}
-		}
-
-		if(format == 1) {
-			// raw PCM: no encoder, Write() goes directly to the handle.
-			return S_OK;
-		}
-
-		sapicli::EncoderOptions opts{};
-		opts.audio.sample_rate = pWaveFormatEx->nSamplesPerSec;
-		opts.audio.channels = pWaveFormatEx->nChannels;
-		opts.audio.bits_per_sample = pWaveFormatEx->wBitsPerSample;
-		opts.multiplex_events = !!encodes_events;
-		switch(format) {
-			case 3: opts.format = sapicli::Format::OggVorbis; break;
-			case 4: opts.format = sapicli::Format::OggOpus; break;
-			case 5: opts.format = sapicli::Format::Mp3; break;
-			default:
-				fwprintf(stderr, L"Invalid format %d\n", format);
-				return E_INVALIDARG;
-		}
-		HANDLE audio_h = h;
-		try {
-			encoder = sapicli::make_encoder(opts, [audio_h](const void* data, std::size_t len) {
-				DWORD written;
-				WriteFile(audio_h, data, (DWORD)len, &written, NULL);
-			});
-		} catch(const std::exception& e) {
-			fwprintf(stderr, L"Could not init encoder: %hs\n", e.what());
-			return E_FAIL;
-		}
-
-		return S_OK;
-	}
-
-	virtual STDMETHODIMP Close(void) {
-		if(encoder) {
-			try {
-				encoder->finish();
-			} catch(const std::exception& e) {
-				fwprintf(stderr, L"Could not finish encoder: %hs\n", e.what());
-				return E_FAIL;
-			}
-			encoder.reset();
-		}
-
-		if(isStdout || !h) return S_OK;
-
-		BOOL b = CloseHandle(h);
-		if(b) return S_OK;
-
-		DWORD e = GetLastError();
-		WCHAR buf[MAX_PATH];
-		FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, 0, e, 0, buf, sizeof(buf) / sizeof(buf[0]), 0);
-		fwprintf(stderr, L"Could not close \"%s\": 0x%08x (%s)", filename, e, buf);
-		return HRESULT_FROM_WIN32(e);
-	}
-
-	virtual HRESULT STDMETHODCALLTYPE Write(const void *buf, ULONG size, ULONG *newPos) {
-		if(encoder) {
-			try {
-				encoder->write_audio(buf, size);
-			} catch(const std::exception& e) {
-				fwprintf(stderr, L"write_audio failed: %hs\n", e.what());
-				return E_FAIL;
-			}
-			if(newPos) *newPos = size;
-			return S_OK;
-		}
-		// raw PCM: pass through directly
-		DWORD written;
-		BOOL b = WriteFile(h, buf, size, &written, NULL);
-		if(newPos) *newPos = written;
-		return b ? S_OK : E_FAIL;
-	}
-
-	virtual STDMETHODIMP writeEventData(void *buf, size_t size) {
-		if(encoder && multiplex) {
-			try {
-				encoder->write_event(buf, size);
-			} catch(const std::exception& e) {
-				fwprintf(stderr, L"write_event failed: %hs\n", e.what());
-				return E_FAIL;
-			}
-			return S_OK;
-		}
-		if(eh) {
-			DWORD written;
-			BOOL b = WriteFile(eh, buf, (DWORD)size, &written, NULL);
-			return (b && written == size) ? S_OK : E_FAIL;
-		}
-		return S_OK;
-	}
-};
+static sapicli::SpeakMode mode_for_flags(DWORD flags) {
+	if(flags & SPF_PARSE_SSML) return sapicli::SpeakMode::Ssml;
+	if(flags & SPF_PARSE_SAPI) return sapicli::SpeakMode::Sapi;
+	if(flags & SPF_PARSE_AUTODETECT) return sapicli::SpeakMode::Auto;
+	return sapicli::SpeakMode::Text;
+}
 
 int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, int rate, int volume, DWORD speakFlags, DWORD samplesPerSec, WORD bitsPerSample, WORD nChannels, ULONGLONG ullEventInterest, BOOL multiplex) {
-	HRESULT hr;
-
 	if(SP_IS_BAD_STRING_PTR(wavFilename)) {
 		fwprintf(stderr, L"Invalid filename\n");
 		return 1;
 	}
-
 	if(SP_IS_BAD_STRING_PTR(text)) {
 		fwprintf(stderr, L"Invalid text\n");
 		return 1;
@@ -452,115 +165,105 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 		if(wavFilename && wavFilename[0]) {
 			size_t s = wcslen(wavFilename);
 			if(s >= 4) {
-				if(!_wcsicmp(wavFilename + s - 4, L".wav"))
-					outType = 2;
-				else if(!_wcsicmp(wavFilename + s - 4, L".ogg"))
-					outType = 3;
-				else if(!_wcsicmp(wavFilename + s - 4, L".mp3"))
-					outType = 5;
+				if(!_wcsicmp(wavFilename + s - 4, L".wav"))      outType = 2;
+				else if(!_wcsicmp(wavFilename + s - 4, L".ogg")) outType = 3;
+				else if(!_wcsicmp(wavFilename + s - 4, L".mp3")) outType = 5;
 			}
 		}
 	}
 
-	if(addLexemes())
-		return 1;
+	if(addLexemes()) return 1;
 
-	CComPtr<ISpVoice> voice;
-	hr = voice.CoCreateInstance(CLSID_SpVoice);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not create voice instance: %d %s\n", hr, getErrorString(hr));
-		return 1;
-	}
+	bool isStdout = wavFilename && wavFilename[0] == L'-' && wavFilename[1] == 0;
 
-	CComPtr<ISpObjectToken> voiceToken;
-	if(voiceId && voiceId[0]) {
-		WCHAR fullVoiceId[MAX_PATH];
-		_snwprintf_s(fullVoiceId, MAX_PATH, _TRUNCATE, L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\%s", voiceId);
+	try {
+		sapicli::Synthesizer synth;
+		synth.set_voice(voiceId ? voiceId : L"");
+		synth.set_rate(rate);
+		synth.set_volume(volume);
+		synth.set_format({ samplesPerSec, nChannels, bitsPerSample });
+		synth.set_event_interest(ullEventInterest);
 
-		hr = SpGetTokenFromId(fullVoiceId, &voiceToken);
-		if(FAILED(hr)) {
-			fwprintf(stderr, L"Could not get token for voice \"%s\": %d %s\n", voiceId, hr, getErrorString(hr));
+		if(outType == 2) {
+			// WAV: SAPI native — handles RIFF + EVNT chunks itself.
+			synth.speak_to_wav_file(wavFilename, text, mode_for_flags(speakFlags));
+			return 0;
+		}
+
+		HANDLE h = isStdout
+			? GetStdHandle(STD_OUTPUT_HANDLE)
+			: CreateFileW(wavFilename, GENERIC_WRITE, FILE_SHARE_READ, 0, CREATE_ALWAYS,
+			              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, 0);
+		if(h == INVALID_HANDLE_VALUE) {
+			DWORD e = GetLastError();
+			WCHAR buf[MAX_PATH];
+			FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, 0, e, 0, buf, sizeof(buf) / sizeof(buf[0]), 0);
+			fwprintf(stderr, L"Could not open \"%s\" for writing: %d %s\n", wavFilename, e, buf);
 			return 1;
 		}
 
-		hr = voice->SetVoice(voiceToken);
-		if(FAILED(hr)) {
-			fwprintf(stderr, L"Could not set voice: %d %s\n", hr, getErrorString(hr));
-			return 1;
+		bool encodes_events = multiplex && outType != 1;
+		HANDLE eh = NULL;
+		if(ullEventInterest && !encodes_events) {
+			if(isStdout) {
+				eh = (HANDLE)_get_osfhandle(3);
+			} else {
+				fwprintf(stderr, L"Cannot select events (0x%04llx) when output is not stdout and multiplexing is not enabled\n", ullEventInterest);
+				if(!isStdout) CloseHandle(h);
+				return 1;
+			}
 		}
-	}
 
-	hr = voice->SetRate(rate);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not set rate to %d: %d %s\n", rate, hr, getErrorString(hr));
-		return 1;
-	}
-
-	hr = voice->SetVolume(volume);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not set volume to %d: %d %s\n", volume, hr, getErrorString(hr));
-		return 1;
-	}
-
-	ISpStream *outputStream = 0;
-	if(outType == 2) {
-		HRESULT hr = ::CoCreateInstance(CLSID_SpStream, NULL, CLSCTX_ALL, __uuidof(outputStream), (void **)&outputStream);
-		if(FAILED(hr)) {
-			fwprintf(stderr, L"Could not instantiate SpStream: %d %s\n", hr, getErrorString(hr));
-			return 1;
+		std::unique_ptr<sapicli::Encoder> encoder;
+		if(outType == 1) {
+			// raw PCM: audio sink writes directly to the handle.
+			synth.set_audio_sink([h](const void* data, std::size_t len) {
+				DWORD written;
+				WriteFile(h, data, (DWORD)len, &written, NULL);
+			});
+		} else {
+			sapicli::EncoderOptions opts{};
+			opts.audio.sample_rate = samplesPerSec;
+			opts.audio.channels = nChannels;
+			opts.audio.bits_per_sample = bitsPerSample;
+			opts.multiplex_events = encodes_events;
+			switch(outType) {
+				case 3: opts.format = sapicli::Format::OggVorbis; break;
+				case 4: opts.format = sapicli::Format::OggOpus; break;
+				case 5: opts.format = sapicli::Format::Mp3; break;
+				default:
+					fwprintf(stderr, L"Invalid output type %d\n", outType);
+					if(!isStdout) CloseHandle(h);
+					return 1;
+			}
+			encoder = sapicli::make_encoder(opts, [h](const void* data, std::size_t len) {
+				DWORD written;
+				WriteFile(h, data, (DWORD)len, &written, NULL);
+			});
+			sapicli::Encoder* enc = encoder.get();
+			synth.set_audio_sink([enc](const void* data, std::size_t len) {
+				enc->write_audio(data, len);
+			});
 		}
-	} else if(outType == 1 || outType == 3 || outType == 4 || outType == 5) {
-		outputStream = new MuxSpStream(outType, multiplex);
-	} else {
-		fwprintf(stderr, L"Invalid output type %d\n", outType);
-		return E_INVALIDARG;
-	}
 
-	if(!outputStream) {
-		fwprintf(stderr, L"Could not initialize output stream\n");
-		return E_FAIL;
-	}
+		synth.set_event_sink([&encoder, encodes_events, eh](const void* data, std::size_t len) {
+			if(encoder && encodes_events) {
+				encoder->write_event(data, len);
+			} else if(eh) {
+				DWORD written;
+				WriteFile(eh, data, (DWORD)len, &written, NULL);
+			}
+		});
 
-	WAVEFORMATEX wfex;
-	wfex.wFormatTag = WAVE_FORMAT_PCM;
-	wfex.nChannels = nChannels;
-	wfex.nSamplesPerSec = samplesPerSec;
-	wfex.wBitsPerSample = bitsPerSample;
-	wfex.nBlockAlign = wfex.nChannels * wfex.wBitsPerSample / 8;
-	wfex.nAvgBytesPerSec = wfex.nSamplesPerSec * wfex.nBlockAlign;
-	wfex.cbSize = 0;
-	hr = outputStream->BindToFile(wavFilename, SPFM_CREATE_ALWAYS, &SPDFID_WaveFormatEx, &wfex, ullEventInterest);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not bind to file %s: %d %s\n", wavFilename, hr, getErrorString(hr));
-		outputStream->Release();
+		synth.speak(text, mode_for_flags(speakFlags));
+
+		if(encoder) encoder->finish();
+		if(!isStdout) CloseHandle(h);
+		return 0;
+	} catch(const std::exception& e) {
+		fwprintf(stderr, L"Synthesis failed: %hs\n", e.what());
 		return 1;
 	}
-
-	hr = voice->SetOutput(outputStream, FALSE);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not set output: %d %s\n", hr, getErrorString(hr));
-		return 1;
-	}
-
-	hr = voice->Speak(text, speakFlags, 0);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not speak: %x %s\n", hr, getErrorString(hr));
-		return 1;
-	}
-
-	// Release here so the destructor doesn't do it after we've closed the output file
-	voice.Release();
-
-	hr = outputStream->Close();
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not close output stream \"%s\": 0x%08x %s\n", wavFilename, hr, getErrorString(hr));
-		return 1;
-	}
-
-	if(voiceId && voiceId[0])
-		voiceToken.Release();
-
-	return 0;
 }
 
 int wmain(int argc, WCHAR *argv[]) {
