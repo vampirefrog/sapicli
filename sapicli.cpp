@@ -14,11 +14,8 @@
 #include <io.h>
 #include <fcntl.h>
 
-#include "muxaudio/encoder.h"
-#include "muxaudio/raw_encoder.h"
-#include "muxaudio/mp3_encoder.h"
-#include "muxaudio/ogg_vorbis_encoder.h"
-#include "muxaudio/ogg_opus_encoder.h"
+#include "core/encoders/encoder.h"
+#include <stdexcept>
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
@@ -204,15 +201,6 @@ int addLexemes() {
 	return 0;
 }
 
-static int write_cb(struct encoder *encoder, void *buf, int buf_size, void *data_ptr) {
-	wprintf(L"write_cb %d\n", buf_size);
-	DWORD numberOfBytesWritten;
-	BOOL b = WriteFile((HANDLE)data_ptr, buf, buf_size, &numberOfBytesWritten, 0);
-	if(!b) return -1;
-	if(numberOfBytesWritten != buf_size) return -2;
-	return 0;
-}
-
 class MuxSpStream: public ISpStream, public ISpEventSink {
 public:
 	LPCWSTR filename;
@@ -223,10 +211,10 @@ public:
 	BOOL multiplex;
 	HANDLE h;
 	BOOL isStdout;
-	HANDLE eh; // events file handle
-	struct encoder *encoder; // we allocate this below, depending on the format
+	HANDLE eh; // events file handle (used when not multiplexing into the encoder)
+	std::unique_ptr<sapicli::Encoder> encoder;
 
-	MuxSpStream(LONG format_, BOOL multiplex_): filename(0), wfex{ 0 }, formatId(0), ullEventInterest(0), format(format_), multiplex(multiplex_), h(0), isStdout(0), eh(0), encoder(0) {}
+	MuxSpStream(LONG format_, BOOL multiplex_): filename(0), wfex{ 0 }, formatId(0), ullEventInterest(0), format(format_), multiplex(multiplex_), h(0), isStdout(0), eh(0) {}
 
 	STDMETHODIMP QueryInterface(REFIID riid, void **ppv) {
 		if(ppv == NULL) return E_INVALIDARG;
@@ -341,9 +329,10 @@ public:
 			}
 		}
 
+		bool encodes_events = multiplex && format != 1;
 		if(ullEventInterest_) {
-			if(multiplex) {
-				eh = h;
+			if(encodes_events) {
+				eh = NULL;  // events handled by the encoder
 			} else if(isStdout) {
 				eh = (HANDLE)_get_osfhandle(3);
 			} else {
@@ -352,67 +341,50 @@ public:
 			}
 		}
 
-		int r;
+		if(format == 1) {
+			// raw PCM: no encoder, Write() goes directly to the handle.
+			return S_OK;
+		}
+
+		sapicli::EncoderOptions opts{};
+		opts.audio.sample_rate = pWaveFormatEx->nSamplesPerSec;
+		opts.audio.channels = pWaveFormatEx->nChannels;
+		opts.audio.bits_per_sample = pWaveFormatEx->wBitsPerSample;
+		opts.multiplex_events = !!encodes_events;
 		switch(format) {
-			case 1:
-				encoder = (struct encoder *)new struct raw_encoder;
-				if(!encoder) {
-					fwprintf(stderr, L"Could not allocate raw_encoder\n");
-					return ERROR_OUTOFMEMORY;
-				}
-				r = raw_encoder_init((raw_encoder *)encoder, multiplex, write_cb, h);
-				if(r) {
-					fwprintf(stderr, L"Could not init raw encoder (0x%04x)\n", r);
-					return E_FAIL;
-				}
-				break;
-			case 3:
-				encoder = (struct encoder *)new struct ogg_vorbis_encoder;
-				if(!encoder) {
-					fwprintf(stderr, L"Could not allocate ogg_vorbis_encoder\n");
-					return ERROR_OUTOFMEMORY;
-				}
-				r = ogg_vorbis_encoder_init((struct ogg_vorbis_encoder *)encoder, pWaveFormatEx->nSamplesPerSec, pWaveFormatEx->nChannels, pWaveFormatEx->wBitsPerSample, multiplex, write_cb, h);
-				if(r) {
-					fwprintf(stderr, L"Could not init ogg vorbis encoder (0x%04x)\n", r);
-					return E_FAIL;
-				}
-				break;
-			case 4:
-				encoder = (struct encoder *)new struct ogg_opus_encoder;
-				if(!encoder) {
-					fwprintf(stderr, L"Could not allocate ogg_opus_encoder\n");
-					return ERROR_OUTOFMEMORY;
-				}
-				wprintf(L"samples=%d channels=%d\n", pWaveFormatEx->nSamplesPerSec, pWaveFormatEx->nChannels);
-				r = ogg_opus_encoder_init((struct ogg_opus_encoder *)encoder, pWaveFormatEx->nSamplesPerSec, pWaveFormatEx->nChannels, pWaveFormatEx->wBitsPerSample, multiplex, write_cb, h);
-				if(r) {
-					fwprintf(stderr, L"Could not init ogg opus encoder (0x%04x)\n", r);
-					return E_FAIL;
-				}
-				break;
-			case 5:
-				encoder = (struct encoder *)new struct mp3_encoder;
-				if(!encoder) {
-					fwprintf(stderr, L"Could not allocate mp3_encoder\n");
-					return ERROR_OUTOFMEMORY;
-				}
-				r = mp3_encoder_init((struct mp3_encoder *)encoder, pWaveFormatEx->nSamplesPerSec, pWaveFormatEx->nChannels, pWaveFormatEx->wBitsPerSample, multiplex, write_cb, h);
-				if(r) {
-					fwprintf(stderr, L"Could not init ogg vorbis encoder (0x%04x)\n", r);
-					return E_FAIL;
-				}
-				break;
+			case 3: opts.format = sapicli::Format::OggVorbis; break;
+			case 4: opts.format = sapicli::Format::OggOpus; break;
+			case 5: opts.format = sapicli::Format::Mp3; break;
+			default:
+				fwprintf(stderr, L"Invalid format %d\n", format);
+				return E_INVALIDARG;
+		}
+		HANDLE audio_h = h;
+		try {
+			encoder = sapicli::make_encoder(opts, [audio_h](const void* data, std::size_t len) {
+				DWORD written;
+				WriteFile(audio_h, data, (DWORD)len, &written, NULL);
+			});
+		} catch(const std::exception& e) {
+			fwprintf(stderr, L"Could not init encoder: %hs\n", e.what());
+			return E_FAIL;
 		}
 
 		return S_OK;
 	}
 
 	virtual STDMETHODIMP Close(void) {
-		if(isStdout || !h) return S_OK;
+		if(encoder) {
+			try {
+				encoder->finish();
+			} catch(const std::exception& e) {
+				fwprintf(stderr, L"Could not finish encoder: %hs\n", e.what());
+				return E_FAIL;
+			}
+			encoder.reset();
+		}
 
-		int r = encoder_finish(encoder);
-		if(r != 0) return E_FAIL;
+		if(isStdout || !h) return S_OK;
 
 		BOOL b = CloseHandle(h);
 		if(b) return S_OK;
@@ -425,14 +397,39 @@ public:
 	}
 
 	virtual HRESULT STDMETHODCALLTYPE Write(const void *buf, ULONG size, ULONG *newPos) {
-		ULONG written = encoder_encode_samples(encoder, (void *)buf, size);
+		if(encoder) {
+			try {
+				encoder->write_audio(buf, size);
+			} catch(const std::exception& e) {
+				fwprintf(stderr, L"write_audio failed: %hs\n", e.what());
+				return E_FAIL;
+			}
+			if(newPos) *newPos = size;
+			return S_OK;
+		}
+		// raw PCM: pass through directly
+		DWORD written;
+		BOOL b = WriteFile(h, buf, size, &written, NULL);
 		if(newPos) *newPos = written;
-		return written ? S_OK : E_FAIL;
+		return b ? S_OK : E_FAIL;
 	}
 
 	virtual STDMETHODIMP writeEventData(void *buf, size_t size) {
-		ULONG written = encoder_encode_data(encoder, (void *)buf, size);
-		return written ? S_OK : E_FAIL;
+		if(encoder && multiplex) {
+			try {
+				encoder->write_event(buf, size);
+			} catch(const std::exception& e) {
+				fwprintf(stderr, L"write_event failed: %hs\n", e.what());
+				return E_FAIL;
+			}
+			return S_OK;
+		}
+		if(eh) {
+			DWORD written;
+			BOOL b = WriteFile(eh, buf, (DWORD)size, &written, NULL);
+			return (b && written == size) ? S_OK : E_FAIL;
+		}
+		return S_OK;
 	}
 };
 

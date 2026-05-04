@@ -4,3 +4,7 @@ x64
 sapicli.vcxproj.filters
 sapicli.vcxproj.user
 test
+vcpkg_installed/
+.build.bat
+.build.log
+.build.log.err
