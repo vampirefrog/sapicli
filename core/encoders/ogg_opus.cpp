@@ -261,7 +261,9 @@ void OggOpusEncoder::write_event(const void* serialized_event, std::size_t bytes
     impl_->submit_packet(&impl_->event_os, serialized_event, static_cast<long>(bytes),
                          granulepos, /*bos=*/false, /*eos=*/false,
                          impl_->packetno_event++);
-    impl_->emit_pages(&impl_->event_os, /*flush=*/false);
+    // Flush so this event ends its own page; otherwise multiple events share
+    // a page and only the last one's granulepos is observable.
+    impl_->emit_pages(&impl_->event_os, /*flush=*/true);
 }
 
 void OggOpusEncoder::finish() {

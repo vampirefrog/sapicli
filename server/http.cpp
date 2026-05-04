@@ -28,10 +28,15 @@ namespace {
 
 const HTTPAPI_VERSION kVersion = HTTPAPI_VERSION_2;
 
-// StreamWriter that sends an HTTP API v2 chunked response.
-// First write triggers HttpSendHttpResponse (headers + first chunk + MORE_DATA);
-// subsequent writes use HttpSendResponseEntityBody with MORE_DATA;
-// finish() sends a final empty body without MORE_DATA to close.
+// Buffered HTTP response writer. Accumulates writes in memory; on finish()
+// sends one HttpSendHttpResponse call (no MORE_DATA flag), so the API
+// computes and emits Content-Length and the connection closes cleanly.
+//
+// Tradeoff: /synthesize loses real-time streaming — the entire encoded
+// audio is buffered before the response goes out. For interactive use with
+// short utterances this is fine. True chunked-TE streaming is a TODO that
+// requires manually framing chunks (the HTTP API does not auto-add the
+// Transfer-Encoding: chunked header just because MORE_DATA is set).
 class HttpStreamWriter final : public StreamWriter {
 public:
     HttpStreamWriter(HANDLE queue, HTTP_REQUEST_ID req_id) : queue_(queue), req_id_(req_id) {}
@@ -43,31 +48,15 @@ public:
     }
 
     void write(const void* data, std::size_t len) override {
-        if (!headers_sent_) {
-            send_headers_with_chunk(data, len);
-            headers_sent_ = true;
-            if (data && len) entity_open_ = true;
-        } else {
-            send_chunk(data, len);
-            if (len) entity_open_ = true;
-        }
+        if (!data || !len) return;
+        const char* p = static_cast<const char*>(data);
+        buffer_.insert(buffer_.end(), p, p + len);
     }
 
     void finish() override {
-        if (!headers_sent_) {
-            send_headers_with_chunk(nullptr, 0);
-            headers_sent_ = true;
-        }
-        if (entity_open_) {
-            // Final call: no MORE_DATA flag → closes the response stream.
-            HttpSendResponseEntityBody(queue_, req_id_, 0, 0, nullptr, nullptr,
-                                       nullptr, 0, nullptr, nullptr);
-        }
+        if (finished_) return;
         finished_ = true;
-    }
 
-private:
-    void send_headers_with_chunk(const void* data, std::size_t len) {
         HTTP_RESPONSE r{};
         r.StatusCode = static_cast<USHORT>(status_);
         r.pReason = status_text_.c_str();
@@ -77,35 +66,25 @@ private:
             static_cast<USHORT>(content_type_.size());
 
         HTTP_DATA_CHUNK chunk{};
-        if (data && len) {
+        if (!buffer_.empty()) {
             chunk.DataChunkType = HttpDataChunkFromMemory;
-            chunk.FromMemory.pBuffer = const_cast<void*>(data);
-            chunk.FromMemory.BufferLength = static_cast<ULONG>(len);
+            chunk.FromMemory.pBuffer = buffer_.data();
+            chunk.FromMemory.BufferLength = static_cast<ULONG>(buffer_.size());
             r.EntityChunkCount = 1;
             r.pEntityChunks = &chunk;
         }
         ULONG sent = 0;
-        HttpSendHttpResponse(queue_, req_id_, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
-                             &r, nullptr, &sent, nullptr, 0, nullptr, nullptr);
+        HttpSendHttpResponse(queue_, req_id_, 0, &r, nullptr, &sent,
+                             nullptr, 0, nullptr, nullptr);
     }
 
-    void send_chunk(const void* data, std::size_t len) {
-        if (!data || !len) return;
-        HTTP_DATA_CHUNK chunk{};
-        chunk.DataChunkType = HttpDataChunkFromMemory;
-        chunk.FromMemory.pBuffer = const_cast<void*>(data);
-        chunk.FromMemory.BufferLength = static_cast<ULONG>(len);
-        HttpSendResponseEntityBody(queue_, req_id_, HTTP_SEND_RESPONSE_FLAG_MORE_DATA,
-                                   1, &chunk, nullptr, nullptr, 0, nullptr, nullptr);
-    }
-
+private:
     HANDLE queue_;
     HTTP_REQUEST_ID req_id_;
     int status_ = 200;
     std::string status_text_ = "OK";
     std::string content_type_ = "application/octet-stream";
-    bool headers_sent_ = false;
-    bool entity_open_ = false;
+    std::vector<char> buffer_;
     bool finished_ = false;
 };
 

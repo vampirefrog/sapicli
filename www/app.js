@@ -13,6 +13,13 @@ const SPEI_VISEME            = 8;
 // All TTS events bitmask (matches sapi.h SPF_ALL_TTS_EVENTS = 0xfffe).
 const ALL_EVENTS = 0xfffe;
 
+const EVENT_NAMES = {
+  1: 'StartInputStream', 2: 'EndInputStream', 3: 'VoiceChange',
+  4: 'TtsBookmark', 5: 'WordBoundary', 6: 'Phoneme',
+  7: 'SentenceBoundary', 8: 'Viseme', 9: 'TtsAudioLevel',
+  15: 'TtsPrivate',
+};
+
 // ---------------------------------------------------------------------------
 // Characters: sprite sheets + viseme map.
 // Reused from the older ttsservice — same artwork, fresh code.
@@ -163,12 +170,12 @@ class Puppet {
   }
   setViseme(visemeId) {
     if (!this.character) return;
-    const sprite = this.character.visemeMap[visemeId] ?? 0;
-    if (!sprite) {
+    const sprite = this.character.visemeMap[visemeId];
+    if (sprite === undefined || sprite === null) {
       this.mouth.style.display = 'none';
       return;
     }
-    this.mouth.style.display = '';
+    this.mouth.style.display = 'block';
     this.mouth.style.backgroundPosition = `${-sprite * this.character.width}px 0`;
   }
 }
@@ -273,9 +280,12 @@ async function speak(opts) {
     .map(p => Object.assign(decodeEvent(p.data) ?? {}, { granule: p.granule }))
     .filter(e => e.eventId !== undefined);
 
-  // Convert granulepos → wall time. For ogg+vorbis at sample_rate, granule is samples.
-  // For ogg+opus, granule is at 48kHz internally (server uses 48000 for opus).
-  const sampleRate = (format === 'ogg+opus') ? 48000 : 22050;
+  // Event timing: use the per-event SPSERIALIZEDEVENT.ullAudioStreamOffset
+  // (bytes into the source PCM stream). Ogg granulepos is page-level, so
+  // events that share a page would all collapse to the same granule —
+  // audioOffsetBytes is per-event and always correct. Source is what we
+  // requested below: 22050 Hz × 1 ch × 16 bit = 44100 bytes/sec.
+  const SOURCE_BYTES_PER_SECOND = 22050 * 1 * (16 / 8);
 
   bubble.reset(text);
   status.textContent = `playing (${audioBuf.duration.toFixed(2)}s, ${decodedEvents.length} events)`;
@@ -288,7 +298,7 @@ async function speak(opts) {
 
   // Schedule events relative to startAt.
   for (const e of decodedEvents) {
-    const tSec = e.granule / sampleRate;
+    const tSec = e.audioOffsetBytes / SOURCE_BYTES_PER_SECOND;
     const fireAt = startAt + tSec;
     const delayMs = Math.max(0, (fireAt - ctx.currentTime) * 1000);
     setTimeout(() => handleEvent(e, text, puppet, bubble), delayMs);
