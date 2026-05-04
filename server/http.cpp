@@ -9,6 +9,7 @@
 #include "handlers.h"
 #include "auth.h"
 #include "logs.h"
+#include "static.h"
 
 #include <atomic>
 #include <cstdio>
@@ -200,6 +201,14 @@ void dispatch(HANDLE queue, const HTTP_REQUEST* req) {
                       req->CookedUrl.QueryStringLength / sizeof(wchar_t));
         }
         handle_synthesize(qs, w);
+        return;
+    }
+    // Catchall: serve static files for GET (web UI). Anything else → 404.
+    if (req->Verb == HttpVerbGET && req->CookedUrl.pAbsPath) {
+        std::wstring path(req->CookedUrl.pAbsPath,
+                          req->CookedUrl.AbsPathLength / sizeof(wchar_t));
+        HttpStreamWriter w(queue, req->RequestId);
+        handle_static(path, w);
         return;
     }
     send_simple(queue, req->RequestId, 404, "Not Found");

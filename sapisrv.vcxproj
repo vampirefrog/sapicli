@@ -85,6 +85,7 @@
     <ClCompile Include="server\synthesize.cpp" />
     <ClCompile Include="server\auth.cpp" />
     <ClCompile Include="server\logs.cpp" />
+    <ClCompile Include="server\static.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="server\service.h" />
@@ -92,6 +93,7 @@
     <ClInclude Include="server\handlers.h" />
     <ClInclude Include="server\auth.h" />
     <ClInclude Include="server\logs.h" />
+    <ClInclude Include="server\static.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="sapicore.vcxproj">

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>sapicli — TTS demo</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <h1>SAPI TTS demo</h1>
+
+    <section id="stage">
+      <div id="puppet"><div id="mouth"></div></div>
+      <div id="bubble"></div>
+    </section>
+
+    <form id="form">
+      <label for="text">Text</label>
+      <textarea id="text" rows="3">The cat sat on the mat. Then the cat purred at the moon.</textarea>
+
+      <div class="row">
+        <label>Voice
+          <select id="voice"></select>
+        </label>
+        <label>Format
+          <select id="format">
+            <option value="ogg">ogg (vorbis, with events)</option>
+            <option value="ogg+opus">ogg+opus (with events)</option>
+            <option value="mp3">mp3 (no streamed events)</option>
+          </select>
+        </label>
+        <label>Character
+          <select id="character">
+            <option value="cat">cat</option>
+            <option value="mic">mic</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="row">
+        <label>Rate <input id="rate" type="range" min="-10" max="10" value="0"></label>
+        <label>Volume <input id="volume" type="range" min="0" max="100" value="100"></label>
+        <label>API key <input id="apikey" type="text" placeholder="(optional)" autocomplete="off"></label>
+      </div>
+
+      <button type="submit" id="speak">Speak</button>
+      <span id="status"></span>
+    </form>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
