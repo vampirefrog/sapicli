@@ -1,4 +1,5 @@
 #include "service.h"
+#include "logs.h"
 
 #include <cstdio>
 #include <cstring>
@@ -60,24 +61,28 @@ HANDLE stop_event() { return g_stop_event; }
 
 int run_as_service() {
     if (!ensure_stop_event()) return 1;
+    log::init(log::default_log_dir());
+    log::info("sapisrv service starting");
     SERVICE_TABLE_ENTRYW table[] = {
         { const_cast<LPWSTR>(kServiceName), service_main },
         { nullptr, nullptr },
     };
     if (!StartServiceCtrlDispatcherW(table)) {
         DWORD e = GetLastError();
-        fwprintf(stderr, L"StartServiceCtrlDispatcher failed: %lu\n", e);
+        log::error("StartServiceCtrlDispatcher failed: %lu", e);
         return 1;
     }
+    log::info("sapisrv service stopped");
     return 0;
 }
 
 int run_as_console() {
     if (!ensure_stop_event()) return 1;
+    log::init(log::default_log_dir());
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
-    fwprintf(stderr, L"sapisrv console mode — press Ctrl+C to stop.\n");
+    log::info("sapisrv console mode (Ctrl+C to stop)");
     int rc = run_server();
-    fwprintf(stderr, L"sapisrv stopped.\n");
+    log::info("sapisrv console mode stopped");
     return rc;
 }
 

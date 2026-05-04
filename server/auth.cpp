@@ -1,4 +1,5 @@
 #include "auth.h"
+#include "logs.h"
 
 #include <nlohmann/json.hpp>
 
@@ -97,8 +98,8 @@ void load_auth_config(const std::wstring& keys_json_path) {
 
     std::ifstream f(keys_json_path);
     if (!f) {
-        fwprintf(stderr, L"auth: %s not present, using public-only defaults (qps=%g burst=%g)\n",
-                 keys_json_path.c_str(), g_public.qps, g_public.burst);
+        log::info("auth: %ls not present, using public-only defaults (qps=%g burst=%g)",
+                  keys_json_path.c_str(), g_public.qps, g_public.burst);
         return;
     }
     nlohmann::json j;
@@ -118,8 +119,8 @@ void load_auth_config(const std::wstring& keys_json_path) {
             g_keys[it.key()] = kc;
         }
     }
-    fwprintf(stderr, L"auth: loaded %zu key(s); public qps=%g burst=%g\n",
-             g_keys.size(), g_public.qps, g_public.burst);
+    log::info("auth: loaded %zu key(s); public qps=%g burst=%g",
+              g_keys.size(), g_public.qps, g_public.burst);
 }
 
 AuthDecision check_auth(const AuthRequest& req) {

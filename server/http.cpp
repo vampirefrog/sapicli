@@ -8,6 +8,7 @@
 #include "service.h"
 #include "handlers.h"
 #include "auth.h"
+#include "logs.h"
 
 #include <atomic>
 #include <cstdio>
@@ -303,7 +304,7 @@ int run_http_server(const HttpConfig& cfg) {
         return 1;
     }
 
-    fwprintf(stderr, L"sapisrv listening on %s\n", cfg.url_prefix.c_str());
+    log::info("sapisrv listening on %ls", cfg.url_prefix.c_str());
 
     std::thread shutdown_thread(shutdown_watcher, queue);
 
