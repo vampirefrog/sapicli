@@ -254,21 +254,30 @@ async function speak(opts) {
   const { text, voice, format, rate, volume, apiKey, status, puppet, bubble } = opts;
   status.textContent = 'requesting…';
 
-  // Format → muxaudio codec name + per-codec sample rate. Opus only accepts
-  // 8/12/16/24/48 kHz, so the server snaps requests to 24000 for opus.
-  // For vorbis/opus the WASM decoder returns PCM samples we wrap in an
-  // AudioBuffer. For mp3 it returns raw mp3 frame bytes (passthrough demux);
-  // we hand those to decodeAudioData() so the browser's native mp3 decoder
-  // does the audio while we keep the side-channel events from WASM.
-  let codec, sampleRate, mp3Passthrough = false;
+  // Format options. Three event-bearing modes go through the WASM demuxer;
+  // "mp3" plain skips it entirely and lets the browser native-decode the
+  // unwrapped mp3 stream.
+  //
+  //   ogg / ogg+opus    — WASM decodes PCM + extracts side-channel events
+  //   mp3+events        — WASM demuxes leb128, hands raw mp3 frames to the
+  //                       browser via decodeAudioData(), keeps events
+  //   mp3 (plain)       — server emits a normal mp3 file (multiplex=false),
+  //                       no events, no WASM, raw decodeAudioData()
+  let codec, sampleRate, multiplex = true, mp3Passthrough = false;
   if (format === 'ogg' || format === 'ogg+vorbis') { codec = 'vorbis'; sampleRate = 22050; }
   else if (format === 'ogg+opus')                  { codec = 'opus';   sampleRate = 24000; }
-  else if (format === 'mp3')                       { codec = 'mp3';    sampleRate = 22050; mp3Passthrough = true; }
+  else if (format === 'mp3+events')                { codec = 'mp3';    sampleRate = 22050; mp3Passthrough = true; }
+  else if (format === 'mp3')                       { codec = null;     sampleRate = 22050; multiplex = false; }
   else { status.textContent = `unsupported format: ${format}`; return; }
 
+  // The wire format param the server expects is always "mp3", "ogg", or
+  // "ogg+opus". The "+events" suffix is purely a client-side UI distinction.
+  const wireFormat = format === 'mp3+events' ? 'mp3' : format;
+
   const params = new URLSearchParams({
-    text, format, rate, volume,
-    events: 'all', multiplex: 'true',
+    text, format: wireFormat, rate, volume,
+    events: multiplex ? 'all' : '0',
+    multiplex: multiplex ? 'true' : 'false',
     sample_rate: String(sampleRate), channels: '1', bits: '16',
   });
   if (voice) params.set('voice', voice);
@@ -289,12 +298,28 @@ async function speak(opts) {
 
   status.textContent = 'downloading…';
   const arrayBuf = await resp.arrayBuffer();
-  const inputBytes = new Uint8Array(arrayBuf);
+
+  // Plain mp3 path: skip WASM, hand the bytes to the browser as-is.
+  if (!multiplex) {
+    const ctx = getAudio();
+    if (ctx.state === 'suspended') await ctx.resume();
+    let audioBuf;
+    try { audioBuf = await ctx.decodeAudioData(arrayBuf.slice(0)); }
+    catch (e) { status.textContent = 'decodeAudioData failed: ' + e.message; return; }
+    bubble.reset(text);
+    status.textContent = `playing plain mp3 (${audioBuf.duration.toFixed(2)}s, no events)`;
+    const src = ctx.createBufferSource();
+    src.buffer = audioBuf;
+    src.connect(ctx.destination);
+    src.start();
+    src.onended = () => { puppet.setViseme(0); bubble.end(); status.textContent = 'done'; };
+    return;
+  }
 
   status.textContent = 'decoding (muxaudio wasm)…';
   let decoded;
   try {
-    decoded = await decodeWithMuxaudio(codec, inputBytes);
+    decoded = await decodeWithMuxaudio(codec, new Uint8Array(arrayBuf));
   } catch (e) {
     status.textContent = 'mux decode failed: ' + e.message;
     return;
