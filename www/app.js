@@ -59,7 +59,10 @@ async function getMuxModule() {
 }
 
 // Decode a complete muxed response in one shot. Returns
-// { audio: Int16Array (interleaved if stereo), events: Uint8Array[] }.
+// { audio: Uint8Array, events: Uint8Array[] }.
+// Audio bytes are PCM int16 little-endian for vorbis/opus (interleaved if
+// stereo), or raw MP3 frames in mp3 passthrough mode. Caller decides how to
+// interpret based on the codec.
 async function decodeWithMuxaudio(codec, bytes) {
   const m = await getMuxModule();
 
@@ -86,13 +89,10 @@ async function decodeWithMuxaudio(codec, bytes) {
       const written = m.HEAPU32[writtenPtr >> 2];
       if (written > 0) {
         const st = m.HEAP32[stPtr >> 2];
-        if (st === MUX_STREAM_AUDIO) {
-          // PCM is int16. Copy out (slice() detaches from HEAP).
-          const samples = written >> 1;
-          audioChunks.push(new Int16Array(m.HEAP16.buffer, outPtr, samples).slice());
-        } else {
-          eventBlobs.push(m.HEAPU8.slice(outPtr, outPtr + written));
-        }
+        // slice() detaches from the WASM HEAP into a JS-owned buffer.
+        const chunk = m.HEAPU8.slice(outPtr, outPtr + written);
+        if (st === MUX_STREAM_AUDIO) audioChunks.push(chunk);
+        else                          eventBlobs.push(chunk);
       }
       // -4 AGAIN: nothing more right now. -6 EOF: end of stream. else error.
       if (r === -4 || r === -6) return r;
@@ -120,9 +120,9 @@ async function decodeWithMuxaudio(codec, bytes) {
   m._free(outPtr); m._free(writtenPtr); m._free(stPtr);
   _destroy(dec);
 
-  // Concatenate audio chunks.
-  const totalSamples = audioChunks.reduce((s, c) => s + c.length, 0);
-  const audio = new Int16Array(totalSamples);
+  // Concatenate audio chunks into a single byte buffer.
+  const totalBytes = audioChunks.reduce((s, c) => s + c.length, 0);
+  const audio = new Uint8Array(totalBytes);
   let off = 0;
   for (const c of audioChunks) { audio.set(c, off); off += c.length; }
   return { audio, events: eventBlobs };
@@ -255,12 +255,15 @@ async function speak(opts) {
   status.textContent = 'requesting…';
 
   // Format → muxaudio codec name + per-codec sample rate. Opus only accepts
-  // 8/12/16/24/48 kHz, so the server snaps requests to 24000 for opus; the
-  // decoder outputs PCM at whatever rate the codec used.
-  let codec, sampleRate;
+  // 8/12/16/24/48 kHz, so the server snaps requests to 24000 for opus.
+  // For vorbis/opus the WASM decoder returns PCM samples we wrap in an
+  // AudioBuffer. For mp3 it returns raw mp3 frame bytes (passthrough demux);
+  // we hand those to decodeAudioData() so the browser's native mp3 decoder
+  // does the audio while we keep the side-channel events from WASM.
+  let codec, sampleRate, mp3Passthrough = false;
   if (format === 'ogg' || format === 'ogg+vorbis') { codec = 'vorbis'; sampleRate = 22050; }
   else if (format === 'ogg+opus')                  { codec = 'opus';   sampleRate = 24000; }
-  else if (format === 'mp3')                       { codec = 'mp3';    sampleRate = 22050; }
+  else if (format === 'mp3')                       { codec = 'mp3';    sampleRate = 22050; mp3Passthrough = true; }
   else { status.textContent = `unsupported format: ${format}`; return; }
 
   const params = new URLSearchParams({
@@ -301,14 +304,29 @@ async function speak(opts) {
   const ctx = getAudio();
   if (ctx.state === 'suspended') await ctx.resume();
 
-  // Build an AudioBuffer from the decoded PCM (mono, int16 → float32).
   if (audio.length === 0) {
-    status.textContent = `decoded 0 audio samples (${eventBlobs.length} events)`;
+    status.textContent = `decoded 0 audio bytes (${eventBlobs.length} events)`;
     return;
   }
-  const audioBuf = ctx.createBuffer(1, audio.length, sampleRate);
-  const ch = audioBuf.getChannelData(0);
-  for (let i = 0; i < audio.length; ++i) ch[i] = audio[i] / 32768;
+
+  let audioBuf;
+  if (mp3Passthrough) {
+    // muxaudio's WASM build doesn't carry mpg123, so the "audio" output
+    // here is raw mp3 frames. Hand the concatenated stream to the browser's
+    // native mp3 decoder.
+    try {
+      audioBuf = await ctx.decodeAudioData(audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength));
+    } catch (e) {
+      status.textContent = 'mp3 decodeAudioData failed: ' + e.message;
+      return;
+    }
+  } else {
+    // PCM int16 little-endian. Convert to float32 in an AudioBuffer.
+    const pcm = new Int16Array(audio.buffer, audio.byteOffset, audio.byteLength >> 1);
+    audioBuf = ctx.createBuffer(1, pcm.length, sampleRate);
+    const ch = audioBuf.getChannelData(0);
+    for (let i = 0; i < pcm.length; ++i) ch[i] = pcm[i] / 32768;
+  }
 
   // muxaudio's mux_decoder_read coalesces queued side-channel packets into one
   // ring-buffer read, so a single blob may contain many SPSERIALIZEDEVENTs back
