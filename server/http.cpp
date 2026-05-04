@@ -7,6 +7,7 @@
 #include "http.h"
 #include "service.h"
 #include "handlers.h"
+#include "auth.h"
 
 #include <atomic>
 #include <cstdio>
@@ -14,6 +15,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <ws2tcpip.h>
 
 #pragma comment(lib, "httpapi.lib")
 
@@ -118,6 +121,65 @@ void send_simple(HANDLE queue, HTTP_REQUEST_ID req_id, int status, const char* t
     w.finish();
 }
 
+void send_json(HANDLE queue, HTTP_REQUEST_ID req_id, int status, const char* status_text,
+               const std::string& body) {
+    HttpStreamWriter w(queue, req_id);
+    w.start(status, status_text, "application/json; charset=utf-8");
+    w.write(body.data(), body.size());
+    w.finish();
+}
+
+std::string sockaddr_to_string(const SOCKADDR* sa) {
+    char buf[INET6_ADDRSTRLEN] = {0};
+    if (!sa) return {};
+    if (sa->sa_family == AF_INET) {
+        const SOCKADDR_IN* a = reinterpret_cast<const SOCKADDR_IN*>(sa);
+        inet_ntop(AF_INET, &a->sin_addr, buf, sizeof(buf));
+    } else if (sa->sa_family == AF_INET6) {
+        const SOCKADDR_IN6* a = reinterpret_cast<const SOCKADDR_IN6*>(sa);
+        inet_ntop(AF_INET6, &a->sin6_addr, buf, sizeof(buf));
+    }
+    return buf;
+}
+
+std::string extract_api_key(const HTTP_REQUEST* req) {
+    // Header takes precedence: Authorization: Bearer <key>
+    const auto& auth_h = req->Headers.KnownHeaders[HttpHeaderAuthorization];
+    if (auth_h.pRawValue && auth_h.RawValueLength > 0) {
+        std::string v(auth_h.pRawValue, auth_h.RawValueLength);
+        constexpr const char* prefix = "Bearer ";
+        if (v.compare(0, 7, prefix) == 0) return v.substr(7);
+    }
+    // Fallback: ?api_key=... in query string. Wide-char ASCII scan.
+    if (req->CookedUrl.pQueryString && req->CookedUrl.QueryStringLength) {
+        const wchar_t* qs = req->CookedUrl.pQueryString;
+        size_t qslen = req->CookedUrl.QueryStringLength / sizeof(wchar_t);
+        const wchar_t* needle = L"api_key=";
+        size_t nlen = wcslen(needle);
+        for (size_t i = 0; i + nlen <= qslen; ++i) {
+            bool start = (i == 0 || qs[i - 1] == L'?' || qs[i - 1] == L'&');
+            if (!start) continue;
+            if (wcsncmp(qs + i, needle, nlen) != 0) continue;
+            size_t v = i + nlen, e = v;
+            while (e < qslen && qs[e] != L'&') ++e;
+            std::string key;
+            key.reserve(e - v);
+            for (size_t k = v; k < e; ++k) {
+                if (qs[k] < 128) key.push_back(static_cast<char>(qs[k]));
+            }
+            return key;
+        }
+    }
+    return {};
+}
+
+AuthRequest extract_auth_request(const HTTP_REQUEST* req) {
+    AuthRequest a;
+    a.api_key = extract_api_key(req);
+    a.source_ip = sockaddr_to_string(req->Address.pRemoteAddress);
+    return a;
+}
+
 void dispatch(HANDLE queue, const HTTP_REQUEST* req) {
     if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/voices")) {
         HttpStreamWriter w(queue, req->RequestId);
@@ -125,6 +187,11 @@ void dispatch(HANDLE queue, const HTTP_REQUEST* req) {
         return;
     }
     if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/synthesize")) {
+        AuthDecision auth = check_auth(extract_auth_request(req));
+        if (!auth.allowed) {
+            send_json(queue, req->RequestId, auth.status, auth.status_text, auth.body);
+            return;
+        }
         HttpStreamWriter w(queue, req->RequestId);
         std::wstring qs;
         if (req->CookedUrl.pQueryString && req->CookedUrl.QueryStringLength) {
@@ -258,6 +325,19 @@ int run_http_server(const HttpConfig& cfg) {
 
 int run_server() {
     HttpConfig cfg;
+    // Resolve keys.json path: env override, else %ProgramData%\sapicli\keys.json.
+    std::wstring keys_path;
+    wchar_t override_buf[MAX_PATH] = {0};
+    DWORD n = GetEnvironmentVariableW(L"SAPISRV_KEYS_JSON", override_buf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        keys_path = override_buf;
+    } else {
+        wchar_t pd[MAX_PATH] = {0};
+        DWORD pn = GetEnvironmentVariableW(L"ProgramData", pd, MAX_PATH);
+        if (pn == 0 || pn >= MAX_PATH) wcscpy_s(pd, MAX_PATH, L"C:\\ProgramData");
+        keys_path = std::wstring(pd) + L"\\sapicli\\keys.json";
+    }
+    load_auth_config(keys_path);
     return run_http_server(cfg);
 }
 
