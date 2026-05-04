@@ -128,20 +128,45 @@ async function decodeWithMuxaudio(codec, bytes) {
   return { audio, events: eventBlobs };
 }
 
-// SPSERIALIZEDEVENT: 24 bytes
+// SPSERIALIZEDEVENT: 24-byte header
 //   eEventId (i16) elParamType (i16) ulStreamNum (u32)
 //   ullAudioStreamOffset (u64, low half used) wParam (u32) lParam (i32)
+// followed by a payload whose size depends on elParamType:
+//   POINTER (3) with lParam!=0: payload = wParam bytes
+//   STRING (4) / TOKEN (1) with lParam!=0: payload = wParam bytes (wide string + null)
+//   otherwise: no payload
+// Total size is rounded up to a DWORD (4-byte) boundary.
+const SPET_LPARAM_IS_TOKEN   = 1;
+const SPET_LPARAM_IS_POINTER = 3;
+const SPET_LPARAM_IS_STRING  = 4;
+
 function decodeEvent(packet) {
   if (packet.length < 24) return null;
-  const v = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+  const v = new DataView(packet.buffer, packet.byteOffset, 24);
   return {
-    eventId: v.getInt16(0, true),
-    paramType: v.getInt16(2, true),
-    streamNum: v.getUint32(4, true),
+    eventId:          v.getInt16(0, true),
+    paramType:        v.getInt16(2, true),
+    streamNum:        v.getUint32(4, true),
     audioOffsetBytes: v.getUint32(8, true),
-    wParam: v.getUint32(16, true),
-    lParam: v.getInt32(20, true),
+    wParam:           v.getUint32(16, true),
+    lParam:           v.getInt32(20, true),
   };
+}
+
+// Compute the encoded size of one event starting at `off` in `blob`.
+function eventSize(blob, off) {
+  if (off + 24 > blob.length) return 0;
+  const v = new DataView(blob.buffer, blob.byteOffset + off, 24);
+  const elParamType = v.getInt16(2, true);
+  const wParam = v.getUint32(16, true);
+  const lParam = v.getInt32(20, true);
+  let extra = 0;
+  if (lParam !== 0 && (elParamType === SPET_LPARAM_IS_POINTER
+                    || elParamType === SPET_LPARAM_IS_STRING
+                    || elParamType === SPET_LPARAM_IS_TOKEN)) {
+    extra = wParam;
+  }
+  return Math.ceil((24 + extra) / 4) * 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -285,9 +310,21 @@ async function speak(opts) {
   const ch = audioBuf.getChannelData(0);
   for (let i = 0; i < audio.length; ++i) ch[i] = audio[i] / 32768;
 
-  const decodedEvents = eventBlobs
-    .map(decodeEvent)
-    .filter(e => e !== null);
+  // muxaudio's mux_decoder_read coalesces queued side-channel packets into one
+  // ring-buffer read, so a single blob may contain many SPSERIALIZEDEVENTs back
+  // to back. Each event has a 24-byte header optionally followed by a string
+  // or binary payload (size in wParam, padded to a DWORD); see eventSize().
+  const decodedEvents = [];
+  for (const blob of eventBlobs) {
+    let off = 0;
+    while (off + 24 <= blob.length) {
+      const sz = eventSize(blob, off);
+      if (sz === 0 || off + sz > blob.length) break;
+      const e = decodeEvent(blob.subarray(off, off + sz));
+      if (e) decodedEvents.push(e);
+      off += sz;
+    }
+  }
 
   // Event timing: use SPSERIALIZEDEVENT.ullAudioStreamOffset (bytes into the
   // source PCM stream that SAPI synthesized at). The server requests
