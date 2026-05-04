@@ -2,12 +2,10 @@
   "name": "sapicli",
   "version-string": "0.1.0",
   "dependencies": [
-    {
-      "name": "ffmpeg",
-      "default-features": false,
-      "features": ["avcodec", "swresample", "vorbis", "opus", "mp3lame"]
-    },
     "libogg",
+    "libvorbis",
+    "opus",
+    "mp3lame",
     "nlohmann-json"
   ]
 }

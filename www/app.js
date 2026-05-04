@@ -43,8 +43,9 @@ const CHARACTERS = {
 // Walk Ogg pages, reassemble packets per logical bitstream, identify which
 // stream is our event channel by the BOS magic, and yield events with their
 // audio-sample offsets (granulepos on event packets = current audio sample
-// count when the event was emitted).
-const EVENT_MAGIC = '\x80sapievents\x00';
+// count when the event was emitted). The 4-byte "SIDE" magic is muxaudio's
+// convention for the side-channel BOS packet.
+const EVENT_MAGIC = 'SIDE';
 
 function parseOggEvents(buffer) {
   const view = new DataView(buffer);

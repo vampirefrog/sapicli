@@ -176,6 +176,9 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 
 	bool isStdout = wavFilename && wavFilename[0] == L'-' && wavFilename[1] == 0;
 
+	// Snap sample rate to one the chosen encoder accepts (matters for opus).
+	if(outType == 4) samplesPerSec = sapicli::snap_sample_rate(samplesPerSec, sapicli::Format::OggOpus);
+
 	try {
 		sapicli::Synthesizer synth;
 		synth.set_voice(voiceId ? voiceId : L"");

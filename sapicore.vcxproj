@@ -50,7 +50,9 @@
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(SolutionDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)muxaudio\include;$(SolutionDir)muxaudio\src;$(SolutionDir)vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\include\opus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>HAVE_VORBIS;HAVE_OPUS;HAVE_MP3;HAVE_MP3_ENCODE;HAVE_PCM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4244;4267;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -71,17 +73,22 @@
     <ClCompile Include="core\voices.cpp" />
     <ClCompile Include="core\synth.cpp" />
     <ClCompile Include="core\encoders\encoder.cpp" />
-    <ClCompile Include="core\encoders\ogg_vorbis.cpp" />
-    <ClCompile Include="core\encoders\ogg_opus.cpp" />
-    <ClCompile Include="core\encoders\mp3_id3.cpp" />
+    <ClCompile Include="muxaudio\src\buffer.c" />
+    <ClCompile Include="muxaudio\src\core.c" />
+    <ClCompile Include="muxaudio\src\error.c" />
+    <ClCompile Include="muxaudio\src\mux_leb128.c" />
+    <ClCompile Include="muxaudio\src\codec_pcm.c" />
+    <ClCompile Include="muxaudio\src\codec_alaw.c" />
+    <ClCompile Include="muxaudio\src\codec_mulaw.c" />
+    <ClCompile Include="muxaudio\src\codec_vorbis.c" />
+    <ClCompile Include="muxaudio\src\codec_opus.c" />
+    <ClCompile Include="muxaudio\src\codec_mp3.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="core\voices.h" />
     <ClInclude Include="core\synth.h" />
     <ClInclude Include="core\encoders\encoder.h" />
-    <ClInclude Include="core\encoders\ogg_vorbis.h" />
-    <ClInclude Include="core\encoders\ogg_opus.h" />
-    <ClInclude Include="core\encoders\mp3_id3.h" />
+    <ClInclude Include="muxaudio\include\mux.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -43,4 +43,10 @@ struct EncoderOptions {
 
 std::unique_ptr<Encoder> make_encoder(const EncoderOptions& opts, ByteSink sink);
 
+// Snap the requested sample rate to one the encoder can actually accept.
+// libopus only accepts 8/12/16/24/48 kHz; libvorbis and lame are flexible.
+// The caller MUST configure SAPI to emit at the returned rate so the encoder
+// and the synthesizer agree.
+std::uint32_t snap_sample_rate(std::uint32_t requested, Format fmt);
+
 }  // namespace sapicli

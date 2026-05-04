@@ -164,6 +164,7 @@ void handle_synthesize(const std::wstring& query_string, StreamWriter& out) {
     uint32_t sample_rate = static_cast<uint32_t>(int_or(params, L"sample_rate", 22050));
     uint16_t channels = static_cast<uint16_t>(int_or(params, L"channels", 1));
     uint16_t bits = static_cast<uint16_t>(int_or(params, L"bits", 16));
+    if (!finfo.is_raw) sample_rate = sapicli::snap_sample_rate(sample_rate, finfo.encoder_format);
     uint64_t events = find(params, L"events") ? parse_events(*find(params, L"events")) : 0;
     bool multiplex = bool_or(params, L"multiplex", events != 0 && !finfo.is_raw);
     sapicli::SpeakMode mode = find(params, L"type") ? parse_mode(*find(params, L"type"))
