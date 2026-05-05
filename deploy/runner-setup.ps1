@@ -79,10 +79,31 @@ $Pkgs = @(
   # via `node` on the host. Without it act_runner fails the very first
   # step with "Cannot find: node in PATH".
   "OpenJS.NodeJS.LTS"
+  # NOTE: PowerShell 7 is NOT in this list. winget's Microsoft.PowerShell
+  # package installs user-scope by default (an app alias under
+  # %LOCALAPPDATA%\Microsoft\WindowsApps\) which the LocalSystem service
+  # can't see, and the package errors out on `--scope machine` with
+  # "current system configuration does not support the installation".
+  # Install from the upstream MSI a few lines down instead.
 )
 foreach ($p in $Pkgs) {
   Write-Host "winget install $p (no-op if already present)..."
-  & winget install --id $p -e --accept-source-agreements --accept-package-agreements --silent | Out-Null
+  # --scope machine: actrunner runs as LocalSystem (or any service
+  # account, really), so user-scope installs are invisible to it.
+  & winget install --id $p -e --scope machine --accept-source-agreements --accept-package-agreements --silent | Out-Null
+}
+
+# PowerShell 7 from the upstream MSI -- see comment in $Pkgs above.
+# ADD_PATH=1 puts pwsh.exe on machine PATH so the LocalSystem service
+# can find it for `shell: pwsh` workflow steps.
+$PwshExe = "C:\Program Files\PowerShell\7\pwsh.exe"
+if (-not (Test-Path $PwshExe) -or $Force) {
+  $PwshUrl = "https://github.com/PowerShell/PowerShell/releases/download/v7.5.3/PowerShell-7.5.3-win-x64.msi"
+  $PwshMsi = Join-Path $env:TEMP "pwsh-7.5.3-x64.msi"
+  Write-Host "Downloading PowerShell 7.5.3..."
+  Invoke-WebRequest -Uri $PwshUrl -OutFile $PwshMsi
+  Write-Host "Installing PowerShell 7.5.3 (machine-wide, ADD_PATH=1)..."
+  & msiexec /i $PwshMsi /quiet /norestart ADD_PATH=1 | Out-Null
 }
 
 # Install WiX v5 toolset as a dotnet global tool (idempotent).
