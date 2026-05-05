@@ -66,11 +66,14 @@ if (-not (Test-Admin)) { throw "This script must be run as Administrator." }
 # C:\emsdk respectively (set up earlier by hand). cmake / ninja / python
 # go on PATH via winget so the workflow doesn't have to hunt for them.
 # .NET SDK is needed for `dotnet tool install --global wix` (MSI build).
+# NSSM wraps act_runner.exe as a real Windows service (act_runner itself
+# isn't SCM-aware so sc.exe / its own `service install` don't work).
 $Pkgs = @(
   "Kitware.CMake",
   "Ninja-build.Ninja",
   "Python.Python.3.12",
-  "Microsoft.DotNet.SDK.8"
+  "Microsoft.DotNet.SDK.8",
+  "NSSM.NSSM"
 )
 foreach ($p in $Pkgs) {
   Write-Host "winget install $p (no-op if already present)..."
@@ -88,41 +91,107 @@ if (-not (Test-Path $Exe) -or $Force) {
   Invoke-WebRequest -Uri $Url -OutFile $Exe
 }
 
-# Generate a default config if missing (we keep most defaults).
+# Write a minimal config.yaml. We can't use `act_runner generate-config`
+# because that emits the upstream example which pins ubuntu Docker labels
+# and is full of comments; cleaner to hand-write the few keys we care
+# about. Labels MUST live here and not on the `register` CLI -- v0.2.13
+# silently ignores --labels and uses whatever's in this file at register
+# time, which then gets baked into .runner.
 if (-not (Test-Path $ConfigYaml) -or $Force) {
-  Push-Location $InstallDir
-  try { & $Exe generate-config | Out-File -Encoding utf8 $ConfigYaml }
-  finally { Pop-Location }
+  $labelLines = ($Labels -split ',' | ForEach-Object { "    - `"$($_.Trim())`"" }) -join "`n"
+  $cfg = @"
+log:
+  level: info
+
+runner:
+  file: .runner
+  capacity: 1
+  timeout: 3h
+  insecure: false
+  fetch_timeout: 5s
+  fetch_interval: 2s
+  labels:
+$labelLines
+
+cache:
+  enabled: true
+
+container:
+  network: ""
+  privileged: false
+
+host:
+  workdir_parent: ""
+"@
+  Set-Content -Path $ConfigYaml -Value $cfg -Encoding utf8
 }
 
 # Register against the Gitea instance. This writes .runner alongside config.yaml.
 $RunnerFile = Join-Path $InstallDir ".runner"
-if (-not (Test-Path $RunnerFile) -or $Force) {
+if ((-not (Test-Path $RunnerFile)) -or $Force) {
+  if (Test-Path $RunnerFile) { Remove-Item $RunnerFile -Force }
   Write-Host "Registering runner '$Name' against $GiteaUrl..."
   Push-Location $InstallDir
   try {
     & $Exe register --no-interactive --instance $GiteaUrl --token $Token `
-                    --name $Name --labels $Labels --config $ConfigYaml
+                    --name $Name --config $ConfigYaml
+    if ($LASTEXITCODE -ne 0) { throw "act_runner register failed (exit $LASTEXITCODE)" }
   } finally { Pop-Location }
 }
 
-# Install as a Windows service. act_runner's `service install` registers the
-# service under the current user, which is what we want — the build needs the
-# user's PATH (vcpkg, vs build tools, emsdk, python).
+# Install as a Windows service via NSSM. We run as LocalSystem (NSSM's
+# default), not as the current user, so we don't have to handle a
+# password. The build workflow sets VCPKG_ROOT explicitly and shells out
+# to vcvars64.bat / emsdk_env.bat by absolute path, so it doesn't depend
+# on the user's PATH -- only on cmake/ninja/python being on machine PATH
+# (winget puts them there with --scope machine, but its default scope
+# is good enough since the service inherits the machine PATH).
 $ServiceName = "actrunner"
+
+# Find nssm.exe. Order of preference:
+#   1. $InstallDir\nssm.exe (copied here by an earlier run)
+#   2. on PATH (will work in a fresh shell after winget install)
+#   3. directly in winget's package cache (works in the current shell
+#      immediately after the winget install above, since winget hasn't
+#      flushed PATH into our env block yet)
+# We then copy whatever we found into $InstallDir so subsequent runs
+# don't have to hunt.
+$NssmLocal = Join-Path $InstallDir "nssm.exe"
+$Nssm = $null
+if (Test-Path $NssmLocal) {
+  $Nssm = $NssmLocal
+} else {
+  $cmd = Get-Command nssm.exe -ErrorAction SilentlyContinue
+  if ($cmd) { $Nssm = $cmd.Source }
+}
+if (-not $Nssm) {
+  $candidates = Get-ChildItem -Path "$env:LOCALAPPDATA\Microsoft\WinGet\Packages","C:\Program Files\NSSM","C:\Program Files (x86)\NSSM" `
+                              -Filter nssm.exe -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match 'win64' } |
+                Select-Object -First 1
+  if ($candidates) { $Nssm = $candidates.FullName }
+}
+if (-not $Nssm) { throw "nssm.exe not found. Run 'winget install NSSM.NSSM' manually and re-run." }
+if ($Nssm -ne $NssmLocal) {
+  Copy-Item $Nssm $NssmLocal -Force
+  $Nssm = $NssmLocal
+}
+
 $Existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($Existing -and $Force) {
   Write-Host "Stopping + removing existing service..."
   Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
-  & sc.exe delete $ServiceName | Out-Null
+  & $Nssm remove $ServiceName confirm | Out-Null
   $Existing = $null
 }
 if (-not $Existing) {
-  Write-Host "Installing service '$ServiceName'..."
-  Push-Location $InstallDir
-  try {
-    & $Exe service install --user --config $ConfigYaml
-  } finally { Pop-Location }
+  Write-Host "Installing service '$ServiceName' via NSSM..."
+  & $Nssm install $ServiceName $Exe daemon -c $ConfigYaml | Out-Null
+  & $Nssm set $ServiceName AppDirectory $InstallDir | Out-Null
+  & $Nssm set $ServiceName Start         SERVICE_AUTO_START | Out-Null
+  & $Nssm set $ServiceName AppStdout     (Join-Path $InstallDir "stdout.log") | Out-Null
+  & $Nssm set $ServiceName AppStderr     (Join-Path $InstallDir "stderr.log") | Out-Null
+  & $Nssm set $ServiceName Description   "Gitea Actions runner (act_runner) for $GiteaUrl" | Out-Null
   Start-Service $ServiceName
 }
 
@@ -130,4 +199,4 @@ Write-Host ""
 Write-Host "Done. Runner '$Name' is registered and running."
 Write-Host "  Install dir : $InstallDir"
 Write-Host "  Service     : $ServiceName"
-Write-Host "  Logs        : Get-Service $ServiceName ; Get-EventLog Application -Source actrunner -Newest 20"
+Write-Host "  Logs        : Get-Content $InstallDir\stdout.log -Wait"
