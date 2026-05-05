@@ -21,8 +21,17 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      # ---- vcpkg manifest install (libogg/vorbis/opus/mp3lame/nlohmann-json) -
+      # We can't rely on `vcpkg integrate install` because it's per-user and
+      # the runner runs as LocalSystem (whose profile has no vcpkg integ).
+      # Calling `vcpkg install` explicitly here populates vcpkg_installed/
+      # which the vcxproj's AdditionalIncludeDirectories points at.
+      - name: vcpkg install (manifest mode)
+        run: |
+          C:\vcpkg\vcpkg.exe install --triplet=x64-windows-static --x-manifest-root=.
+
       # ---- native build (sapicore.lib + sapicli.exe + sapisrv.exe) -------
-      - name: msbuild Release|x64 (vcpkg manifest installs ffmpeg deps on first run)
+      - name: msbuild Release|x64
         env:
           VCPKG_ROOT: C:\vcpkg
         run: |

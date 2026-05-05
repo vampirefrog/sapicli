@@ -73,7 +73,12 @@ $Pkgs = @(
   "Ninja-build.Ninja",
   "Python.Python.3.12",
   "Microsoft.DotNet.SDK.8",
-  "NSSM.NSSM"
+  "NSSM.NSSM",
+  # Node is needed by act_runner itself: every Gitea/GitHub Actions
+  # JavaScript action (checkout@v4, upload-artifact@v3, etc.) is run
+  # via `node` on the host. Without it act_runner fails the very first
+  # step with "Cannot find: node in PATH".
+  "OpenJS.NodeJS.LTS"
 )
 foreach ($p in $Pkgs) {
   Write-Host "winget install $p (no-op if already present)..."
