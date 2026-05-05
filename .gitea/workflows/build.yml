@@ -74,9 +74,24 @@ jobs:
           Copy-Item deploy\License.rtf $dist\
 
       # ---- MSI build (WiX v5 via dotnet tool) ----------------------------
-      # WiX is installed once by deploy/runner-setup.ps1; this just shells
-      # out to it. Version is the tag (v0.1.2 → 0.1.2) on tag pushes, or
-      # 0.0.0 for branch / PR builds (MSI requires a 4-part version).
+      # Install wix inside the workflow rather than depending on runner-
+      # setup.ps1: that script installs wix as a dotnet global tool under
+      # whichever account ran it (lenovo), but actrunner runs as
+      # LocalSystem and won't see it. The workflow steps run as the
+      # service account too, so installing here gives wix.exe a stable
+      # home at $USERPROFILE\.dotnet\tools (LocalSystem profile in CI,
+      # whoever's running it locally otherwise).
+      - name: install wix dotnet tool (idempotent)
+        shell: pwsh
+        run: |
+          $tools = "$env:USERPROFILE\.dotnet\tools"
+          if (-not (Test-Path "$tools\wix.exe")) {
+            dotnet tool install --global wix --version "5.*"
+            if ($LASTEXITCODE -ne 0) { throw "dotnet tool install wix failed" }
+          }
+          # Make wix.exe visible to subsequent steps in this job.
+          $tools | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_PATH
+
       - name: derive msi version
         id: ver
         shell: pwsh
