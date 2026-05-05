@@ -251,32 +251,33 @@ function getAudio() {
 }
 
 async function speak(opts) {
-  const { text, voice, format, rate, volume, apiKey, status, puppet, bubble } = opts;
+  const { text, voice, format, events, rate, volume, apiKey, status, puppet, bubble } = opts;
   status.textContent = 'requesting…';
 
-  // Format options. Three event-bearing modes go through the WASM demuxer;
-  // "mp3" plain skips it entirely and lets the browser native-decode the
-  // unwrapped mp3 stream.
-  //
-  //   ogg / ogg+opus    — WASM decodes PCM + extracts side-channel events
-  //   mp3+events        — WASM demuxes leb128, hands raw mp3 frames to the
-  //                       browser via decodeAudioData(), keeps events
-  //   mp3 (plain)       — server emits a normal mp3 file (multiplex=false),
-  //                       no events, no WASM, raw decodeAudioData()
-  let codec, sampleRate, multiplex = true, mp3Passthrough = false;
-  if (format === 'ogg' || format === 'ogg+vorbis') { codec = 'vorbis'; sampleRate = 22050; }
-  else if (format === 'ogg+opus')                  { codec = 'opus';   sampleRate = 24000; }
-  else if (format === 'mp3+events')                { codec = 'mp3';    sampleRate = 22050; mp3Passthrough = true; }
-  else if (format === 'mp3')                       { codec = null;     sampleRate = 22050; multiplex = false; }
-  else { status.textContent = `unsupported format: ${format}`; return; }
+  // Format selection is two orthogonal axes: the codec (ogg+vorbis,
+  // ogg+opus, mp3) and whether speech events are interleaved. ogg+*
+  // carries events in a parallel ogg stream regardless; mp3 with
+  // events is wrapped in our leb128 multiplex; mp3 without events
+  // is a plain audio/mpeg file the browser can decode directly.
+  let codec, sampleRate;
+  let multiplex = true;        // server: parallel/leb128 transport on
+  let mp3Passthrough = false;  // client: WASM demuxes leb128 -> raw mp3
+  if (format === 'ogg+vorbis') { codec = 'vorbis'; sampleRate = 22050; }
+  else if (format === 'ogg+opus') { codec = 'opus'; sampleRate = 24000; }
+  else if (format === 'mp3') {
+    if (events) { codec = 'mp3'; sampleRate = 22050; mp3Passthrough = true; }
+    else        { codec = null;  sampleRate = 22050; multiplex = false; }
+  } else { status.textContent = `unsupported format: ${format}`; return; }
 
-  // The wire format param the server expects is always "mp3", "ogg", or
-  // "ogg+opus". The "+events" suffix is purely a client-side UI distinction.
-  const wireFormat = format === 'mp3+events' ? 'mp3' : format;
+  // For ogg+*, multiplexing carries the events on a side channel; turning
+  // events off just tells the server not to emit that channel.
+  if ((format === 'ogg+vorbis' || format === 'ogg+opus') && !events) multiplex = false;
 
+  // The server accepts "ogg" / "ogg+vorbis" / "ogg+opus" / "mp3" verbatim;
+  // pass `format` straight through with no client-side rewriting.
   const params = new URLSearchParams({
-    text, format: wireFormat, rate, volume,
-    events: multiplex ? 'all' : '0',
+    text, format, rate, volume,
+    events: events ? 'all' : '0',
     multiplex: multiplex ? 'true' : 'false',
     sample_rate: String(sampleRate), channels: '1', bits: '16',
   });
@@ -307,7 +308,7 @@ async function speak(opts) {
     try { audioBuf = await ctx.decodeAudioData(arrayBuf.slice(0)); }
     catch (e) { status.textContent = 'decodeAudioData failed: ' + e.message; return; }
     bubble.reset(text);
-    status.textContent = `playing plain mp3 (${audioBuf.duration.toFixed(2)}s, no events)`;
+    status.textContent = `playing plain ${format} (${audioBuf.duration.toFixed(2)}s, no events)`;
     const src = ctx.createBufferSource();
     src.buffer = audioBuf;
     src.connect(ctx.destination);
@@ -444,6 +445,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         text: $('text').value,
         voice: $('voice').value,
         format: $('format').value,
+        events: $('events').checked,
         rate: $('rate').value,
         volume: $('volume').value,
         apiKey: $('apikey').value,

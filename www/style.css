@@ -108,10 +108,17 @@ label {
 
 label > select, label > input { display: block; margin-top: 2px; width: 100%; }
 
+/* checkboxes inline with their label, no full-width input override */
+label.checkbox { display: flex; align-items: center; gap: 6px; }
+label.checkbox > input { display: inline; width: auto; margin: 0; }
+
 .row {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
   gap: 0.75em;
+}
+.row:has(label.checkbox) {
+  grid-template-columns: 1fr 1fr auto 1fr;
 }
 
 button {

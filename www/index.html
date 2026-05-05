@@ -25,11 +25,14 @@
         </label>
         <label>Format
           <select id="format">
-            <option value="ogg">ogg+vorbis (events via parallel stream)</option>
-            <option value="ogg+opus">ogg+opus (events via parallel stream)</option>
-            <option value="mp3+events">mp3 (events via leb128)</option>
-            <option value="mp3">mp3 (plain, no events)</option>
+            <option value="ogg+vorbis">ogg+vorbis</option>
+            <option value="ogg+opus">ogg+opus</option>
+            <option value="mp3">mp3</option>
           </select>
+        </label>
+        <label class="checkbox">
+          <input id="events" type="checkbox" checked>
+          speech events
         </label>
         <label>Character
           <select id="character">
