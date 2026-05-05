@@ -56,7 +56,12 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- Vcpkg deps (vorbis/opus/lame/ogg). Listed explicitly here -->
+      <!-- because we set VcpkgEnableManifest=false in CI to skip the -->
+      <!-- broken BuildTools-bundled vcpkg auto-install; without that -->
+      <!-- auto-install msbuild's vcpkg.targets doesn't inject these. -->
+      <AdditionalLibraryDirectories>$(SolutionDir)vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>ogg.lib;vorbis.lib;vorbisenc.lib;vorbisfile.lib;opus.lib;libmp3lame-static.lib;libmpghip-static.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -96,5 +101,4 @@
     <None Include="zip.bat" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <Import Project="$(VCPKG_ROOT)\scripts\buildsystems\msbuild\vcpkg.targets" Condition="'$(VCPKG_ROOT)' != '' and Exists('$(VCPKG_ROOT)\scripts\buildsystems\msbuild\vcpkg.targets')" />
 </Project>

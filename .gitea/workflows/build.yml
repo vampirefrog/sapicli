@@ -21,19 +21,23 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      # ---- native build (sapicore.lib + sapicli.exe + sapisrv.exe) -------
-      # Each .vcxproj imports $(VCPKG_ROOT)\scripts\buildsystems\msbuild\
-      # vcpkg.targets, which (with VcpkgEnableManifest=true) runs
-      # `vcpkg install` against vcpkg.json before compilation and adds the
-      # right include/lib paths and lib filenames to the linker. So we
-      # don't need a separate explicit `vcpkg install` step -- VCPKG_ROOT
-      # in the env is enough.
+      # ---- vcpkg install + native build ---------------------------------
+      # We can't rely on msbuild's vcpkg.targets auto-install on this
+      # runner: it picks up the vcpkg bundled with VS BuildTools, which
+      # (a) ignores VCPKG_ROOT, and (b) fails to bootstrap on a fresh
+      # LocalSystem profile (a 7zip 25.01 self-extract bug). Workaround:
+      # call C:\vcpkg\vcpkg.exe install ourselves, then build with
+      # VcpkgEnableManifest=false so msbuild doesn't try to re-install.
+      # The vcxprojs explicitly list the vcpkg include/lib dirs and lib
+      # filenames so they don't need the auto-resolution either.
+      - name: vcpkg install (manifest mode)
+        run: |
+          C:\vcpkg\vcpkg.exe install --triplet=x64-windows-static --x-manifest-root=.
+
       - name: msbuild Release|x64
-        env:
-          VCPKG_ROOT: C:\vcpkg
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          msbuild sapicli.sln -p:Configuration=Release -p:Platform=x64 -nologo -m -v:minimal
+          msbuild sapicli.sln -p:Configuration=Release -p:Platform=x64 -p:VcpkgEnableManifest=false -nologo -m -v:minimal
 
       - name: smoke test sapicli --list
         run: x64\Release\sapicli.exe --list
