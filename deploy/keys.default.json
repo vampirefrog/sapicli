@@ -1,0 +1,8 @@
+{
+  "_comment": "Default sapisrv API-key config. Edit this file to add real keys, then restart the service. For format docs see deploy/README.md.",
+  "public_tier": {
+    "qps":   0.5,
+    "burst": 3
+  },
+  "keys": {}
+}

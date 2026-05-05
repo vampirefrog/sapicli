@@ -65,11 +65,21 @@ if (-not (Test-Admin)) { throw "This script must be run as Administrator." }
 # C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools, and
 # C:\emsdk respectively (set up earlier by hand). cmake / ninja / python
 # go on PATH via winget so the workflow doesn't have to hunt for them.
-$Pkgs = @("Kitware.CMake", "Ninja-build.Ninja", "Python.Python.3.12")
+# .NET SDK is needed for `dotnet tool install --global wix` (MSI build).
+$Pkgs = @(
+  "Kitware.CMake",
+  "Ninja-build.Ninja",
+  "Python.Python.3.12",
+  "Microsoft.DotNet.SDK.8"
+)
 foreach ($p in $Pkgs) {
   Write-Host "winget install $p (no-op if already present)..."
   & winget install --id $p -e --accept-source-agreements --accept-package-agreements --silent | Out-Null
 }
+
+# Install WiX v5 toolset as a dotnet global tool (idempotent).
+Write-Host "dotnet tool install wix (no-op if already present)..."
+& dotnet tool install --global wix --version "5.*" 2>&1 | ForEach-Object { Write-Host $_ }
 
 if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory $InstallDir | Out-Null }
 

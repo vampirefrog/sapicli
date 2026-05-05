@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v5 source for the sapisrv Windows Installer.
+
+  Build (locally or in CI):
+    dotnet tool install --global wix --version 5.*
+    wix build deploy\sapisrv.wxs ^
+      -d DistDir=dist ^
+      -d Version=0.1.0 ^
+      -arch x64 ^
+      -o dist\sapisrv-setup.msi
+
+  Silent install / upgrade / uninstall:
+    msiexec /i sapisrv-setup.msi /quiet /norestart
+    msiexec /x sapisrv-setup.msi /quiet /norestart
+    msiexec /i sapisrv-setup.msi /lv* install.log /quiet      (verbose log)
+
+  Layout the installer expects under DistDir (the build workflow stages this):
+    dist/
+      sapicli.exe
+      sapisrv.exe
+      www/...                          (web client + WASM)
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <?define UpgradeCode = "5e1c7f2a-3b4d-4e8f-9a1c-7d3e5f8b2a91" ?>
+
+  <Package
+    Name="sapicli SAPI HTTP Server"
+    Manufacturer="vampi.tech"
+    Version="$(var.Version)"
+    UpgradeCode="$(var.UpgradeCode)"
+    Scope="perMachine"
+    InstallerVersion="500">
+
+    <SummaryInformation Description="sapicli SAPI HTTP Server" />
+    <MediaTemplate EmbedCab="yes" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+
+    <!-- Install root: %ProgramFiles%\sapisrv\ -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="sapisrv" />
+    </StandardDirectory>
+
+    <!-- Per-machine config: %ProgramData%\sapicli\ -->
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="ProgramDataSapicli" Name="sapicli">
+        <Directory Id="ProgramDataSapicliLogs" Name="logs" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="sapisrv" Level="1" Display="expand">
+      <ComponentGroupRef Id="ProgramFilesGroup" />
+      <ComponentGroupRef Id="ProgramDataGroup" />
+    </Feature>
+
+    <!-- ===== Files in Program Files ===== -->
+    <ComponentGroup Id="ProgramFilesGroup">
+
+      <!-- CLI tool (no service, just an installed binary) -->
+      <Component Directory="INSTALLFOLDER">
+        <File Source="$(var.DistDir)\sapicli.exe" />
+      </Component>
+
+      <!-- sapisrv.exe + Windows Service registration + start/stop control -->
+      <Component Directory="INSTALLFOLDER">
+        <File Id="SapisrvExe" Source="$(var.DistDir)\sapisrv.exe" KeyPath="yes">
+          <ServiceInstall
+            Name="sapisrv"
+            DisplayName="sapicli SAPI HTTP Server"
+            Description="Serves SAPI text-to-speech over HTTP, with parallel speech-event multiplexing."
+            Type="ownProcess"
+            Start="auto"
+            ErrorControl="normal"
+            Account="NT AUTHORITY\NetworkService"
+            Arguments="run"
+            Vital="yes" />
+          <ServiceControl
+            Id="ControlSapisrv"
+            Name="sapisrv"
+            Start="install"
+            Stop="both"
+            Remove="uninstall"
+            Wait="yes" />
+        </File>
+      </Component>
+
+      <!-- Web UI (HTML/CSS/JS + WASM + sprites). Auto-harvested into www/ -->
+      <Files Include="$(var.DistDir)\www\**" Directory="INSTALLFOLDER" Subdirectory="www" />
+    </ComponentGroup>
+
+    <!-- ===== Files in ProgramData ===== -->
+    <ComponentGroup Id="ProgramDataGroup">
+
+      <!-- Default keys.json. NeverOverwrite preserves edits across upgrades; -->
+      <!-- the file is intentionally left behind on uninstall (Permanent="yes") -->
+      <!-- so an operator who removes/reinstalls doesn't lose their key list. -->
+      <Component Id="DefaultKeysJson" Directory="ProgramDataSapicli"
+                 Guid="b2a3b4c5-6d7e-8f90-a1b2-c3d4e5f60718"
+                 NeverOverwrite="yes" Permanent="yes">
+        <File Source="$(var.DistDir)\keys.default.json" Name="keys.json" KeyPath="yes" />
+      </Component>
+
+      <!-- Make sure ProgramData\sapicli\logs\ exists (the logger creates it -->
+      <!-- on its own, but registering it here makes uninstall well-behaved   -->
+      <!-- and lets sysadmins set ACLs on it as part of MSI deployment).     -->
+      <Component Id="LogsDir" Directory="ProgramDataSapicliLogs"
+                 Guid="c3b4c5d6-7e8f-90a1-b2c3-d4e5f6071829" Permanent="yes">
+        <CreateFolder />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ===== Custom actions: URL ACL ===== -->
+    <!-- HTTP API on Windows requires an explicit URL reservation per-account.
+         The service runs as NetworkService, so we reserve the prefix for that
+         account. Both actions run deferred + non-impersonated so they execute
+         in the elevated SYSTEM context the MSI provides; netsh's exit code is
+         ignored so a stale reservation on uninstall (or a duplicate on
+         install) doesn't roll back the whole install. -->
+    <Property Id="NETSH_EXE" Value="netsh.exe" />
+
+    <CustomAction Id="AddUrlAcl"
+      Directory="INSTALLFOLDER"
+      ExeCommand='netsh http add urlacl url=http://+:8080/ user="NT AUTHORITY\NetworkService"'
+      Execute="deferred"
+      Impersonate="no"
+      Return="ignore" />
+
+    <CustomAction Id="RemoveUrlAcl"
+      Directory="INSTALLFOLDER"
+      ExeCommand='netsh http delete urlacl url=http://+:8080/'
+      Execute="deferred"
+      Impersonate="no"
+      Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="AddUrlAcl"    After="InstallServices" Condition="NOT Installed" />
+      <Custom Action="RemoveUrlAcl" Before="RemoveFiles"    Condition="REMOVE=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>

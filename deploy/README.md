@@ -30,6 +30,56 @@ in `.gitea/workflows/build.yml` selects it via those labels.
 
 Service name is `actrunner`. Reinstall with `-Force`.
 
-## Install-Service.ps1 / Deploy-Remote.ps1
+## sapisrv.wxs (MSI installer source)
 
-Coming in Step 3.
+WiX v5 source for a per-machine MSI that:
+
+- Copies `sapicli.exe`, `sapisrv.exe`, and `www\` to
+  `C:\Program Files\sapisrv\`
+- Registers `sapisrv` as a Windows Service (account: `NT AUTHORITY\NetworkService`,
+  start type: auto, args: `run`)
+- Reserves the URL ACL: `netsh http add urlacl url=http://+:8080/ user="NT AUTHORITY\NetworkService"`
+- Drops a default `keys.json` at `C:\ProgramData\sapicli\keys.json` if not
+  already present (preserved across upgrade and uninstall — your keys live)
+- Starts the service immediately after install
+
+On uninstall: stops + removes the service, removes the URL ACL, removes
+program files. **`%ProgramData%\sapicli\` is intentionally left behind**
+so logs and `keys.json` survive a reinstall.
+
+### Build (local)
+
+Prereqs: .NET SDK 8+, `wix` dotnet tool, `dist/` already staged with the
+binaries + `www/` + `keys.default.json`.
+
+```powershell
+dotnet tool install --global wix --version "5.*"
+wix build deploy\sapisrv.wxs `
+  -d "DistDir=$pwd\dist" `
+  -d "Version=0.1.0" `
+  -arch x64 `
+  -o dist\sapisrv-setup.msi
+```
+
+### Build (CI)
+
+The `build` job in `.gitea/workflows/build.yml` does the above after
+staging `dist/`. The MSI is uploaded as a separate `actions/upload-artifact`.
+Version comes from the tag (`v0.1.2` → `0.1.2`) or `0.0.0` for branch
+builds.
+
+### Install / uninstall on a target machine
+
+```powershell
+msiexec /i sapisrv-setup.msi /quiet /norestart            # install
+msiexec /x sapisrv-setup.msi /quiet /norestart            # uninstall
+msiexec /i sapisrv-setup.msi /lv* install.log /quiet      # verbose log
+```
+
+After install, `sc query sapisrv` should show `RUNNING`. Logs land at
+`C:\ProgramData\sapicli\logs\sapisrv-YYYYMMDD.log`.
+
+## Deploy-Remote.ps1
+
+Coming in a follow-up — will use PSRemoting to copy the MSI to the prod
+VM and run `msiexec /i ... /quiet` against it.
