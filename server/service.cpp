@@ -11,6 +11,9 @@ namespace {
 HANDLE g_stop_event = nullptr;
 SERVICE_STATUS g_status{};
 SERVICE_STATUS_HANDLE g_status_handle = nullptr;
+// Stashed across StartServiceCtrlDispatcher's threading boundary so
+// service_main can pass it to run_server.
+int g_service_port = kDefaultPort;
 
 void set_service_state(DWORD state, DWORD wait_hint = 0) {
     g_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
@@ -36,7 +39,7 @@ void WINAPI service_main(DWORD, LPWSTR*) {
     if (!g_status_handle) return;
     set_service_state(SERVICE_START_PENDING, 3000);
     set_service_state(SERVICE_RUNNING);
-    run_server();
+    run_server(g_service_port);
     set_service_state(SERVICE_STOPPED);
 }
 
@@ -59,10 +62,11 @@ bool ensure_stop_event() {
 
 HANDLE stop_event() { return g_stop_event; }
 
-int run_as_service() {
+int run_as_service(int port) {
+    g_service_port = port;
     if (!ensure_stop_event()) return 1;
     log::init(log::default_log_dir());
-    log::info("sapisrv service starting");
+    log::info("sapisrv service starting (port=%d)", port);
     SERVICE_TABLE_ENTRYW table[] = {
         { const_cast<LPWSTR>(kServiceName), service_main },
         { nullptr, nullptr },
@@ -76,12 +80,12 @@ int run_as_service() {
     return 0;
 }
 
-int run_as_console() {
+int run_as_console(int port) {
     if (!ensure_stop_event()) return 1;
     log::init(log::default_log_dir());
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
-    log::info("sapisrv console mode (Ctrl+C to stop)");
-    int rc = run_server();
+    log::info("sapisrv console mode (port=%d, Ctrl+C to stop)", port);
+    int rc = run_server(port);
     log::info("sapisrv console mode stopped");
     return rc;
 }

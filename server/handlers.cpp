@@ -1,4 +1,5 @@
 #include "handlers.h"
+#include "auth.h"
 
 #include "core/voices.h"
 
@@ -90,6 +91,18 @@ void handle_health(StreamWriter& out) {
                         GetCurrentProcessId(), up_s);
     out.start(200, "OK", "application/json; charset=utf-8");
     if (n > 0) out.write(body, n);
+    out.finish();
+}
+
+void handle_default_key(StreamWriter& out) {
+    // Returns the api key marked "default": true in keys.json so the
+    // bundled web client can self-configure. Empty string if no default
+    // is set, in which case the client falls back to unauthenticated
+    // (public_tier) mode.
+    std::string key = default_api_key();
+    std::string body = "{\"api_key\":\"" + key + "\"}";
+    out.start(200, "OK", "application/json; charset=utf-8");
+    out.write(body.data(), body.size());
     out.finish();
 }
 

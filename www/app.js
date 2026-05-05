@@ -436,6 +436,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     $('status').textContent = 'failed to load voices: ' + e;
   }
 
+  // Pick up the public-trial api key the installer baked into keys.json,
+  // so anyone hitting the bundled web client gets the rate-limited public
+  // tier without having to know the key. Empty string = no default; the
+  // request goes out unauthenticated and hits public_tier limits instead.
+  try {
+    const r = await fetch('/api/default-key');
+    const j = await r.json();
+    if (j.api_key && !$('apikey').value) {
+      $('apikey').value = j.api_key;
+      $('apikey').placeholder = 'public-trial key (rate limited per IP)';
+    }
+  } catch { /* server might not implement it; harmless */ }
+
   $('form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const btn = $('speak');

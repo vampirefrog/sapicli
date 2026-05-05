@@ -26,8 +26,15 @@ struct AuthDecision {
 //   {
 //     "public_tier": { "qps": 0.5, "burst": 3 },
 //     "keys": {
-//       "<key-string>": { "name": "...", "qps": 10, "burst": 50 },
-//       ...
+//       "<key-string>": {
+//         "name": "...",
+//         "qps": 10, "burst": 50,            // global per-key bucket
+//         "default": true,                   // optional; key returned by /api/default-key
+//         "ip_limits": [                     // optional, all checked, ALL must allow
+//           { "requests": 10,  "per_seconds": 60 },
+//           { "requests": 100, "per_seconds": 3600 }
+//         ]
+//       }
 //     }
 //   }
 void load_auth_config(const std::wstring& keys_json_path);
@@ -35,5 +42,9 @@ void load_auth_config(const std::wstring& keys_json_path);
 // Evaluate one request against the auth + rate-limit policy. Safe to call
 // concurrently from worker threads.
 AuthDecision check_auth(const AuthRequest& req);
+
+// Returns the key marked "default": true in keys.json, or empty string if
+// none. Used by /api/default-key so the web client can self-configure.
+std::string default_api_key();
 
 }  // namespace sapisrv

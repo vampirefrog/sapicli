@@ -13,6 +13,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace sapisrv {
 
@@ -40,6 +41,14 @@ public:
         return false;
     }
 
+    // Roll back a previously-successful try_consume(). Used to avoid
+    // leaking tokens on multi-bucket atomic checks where bucket N+1
+    // denies after buckets 0..N already allowed.
+    void refund() {
+        std::lock_guard<std::mutex> lk(m_);
+        tokens_ = std::min(capacity_, tokens_ + 1.0);
+    }
+
 private:
     static auto clock_now() { return std::chrono::steady_clock::now(); }
     void refill_locked() {
@@ -53,10 +62,17 @@ private:
     std::mutex m_;
 };
 
+struct IpLimit {
+    double qps;
+    double burst;
+};
+
 struct KeyConfig {
     std::string name;
     double qps;
     double burst;
+    bool is_default = false;        // returned by /api/default-key
+    std::vector<IpLimit> ip_limits; // each IP must satisfy ALL of these
 };
 
 struct PublicConfig {
@@ -67,8 +83,12 @@ struct PublicConfig {
 // Process-wide auth state.
 PublicConfig g_public;
 std::unordered_map<std::string, KeyConfig> g_keys;
+std::string g_default_key;          // the one key marked "default": true, if any
 std::unordered_map<std::string, std::unique_ptr<TokenBucket>> g_key_buckets;
 std::unordered_map<std::string, std::unique_ptr<TokenBucket>> g_ip_buckets;
+// Composite key "<api_key>|<ip>" -> one bucket per ip_limits entry.
+std::unordered_map<std::string,
+                   std::vector<std::unique_ptr<TokenBucket>>> g_key_ip_buckets;
 std::mutex g_buckets_mu;
 
 TokenBucket& key_bucket(const std::string& key, const KeyConfig& cfg) {
@@ -85,6 +105,21 @@ TokenBucket& ip_bucket(const std::string& ip) {
     return *b;
 }
 
+// Lazy-create the per-IP buckets attached to (api_key, ip), one per
+// IpLimit entry on the key.
+std::vector<std::unique_ptr<TokenBucket>>& key_ip_buckets(
+        const std::string& api_key, const std::string& ip,
+        const std::vector<IpLimit>& limits) {
+    std::lock_guard<std::mutex> lk(g_buckets_mu);
+    auto& v = g_key_ip_buckets[api_key + "|" + ip];
+    if (v.empty() && !limits.empty()) {
+        v.reserve(limits.size());
+        for (const auto& lim : limits)
+            v.push_back(std::make_unique<TokenBucket>(lim.qps, lim.burst));
+    }
+    return v;
+}
+
 std::string deny_body(const char* reason) {
     return std::string("{\"error\":\"") + reason + "\"}";
 }
@@ -94,6 +129,8 @@ std::string deny_body(const char* reason) {
 void load_auth_config(const std::wstring& keys_json_path) {
     g_keys.clear();
     g_key_buckets.clear();
+    g_key_ip_buckets.clear();
+    g_default_key.clear();
     g_public = {};
 
     std::ifstream f(keys_json_path);
@@ -113,14 +150,29 @@ void load_auth_config(const std::wstring& keys_json_path) {
     if (j.contains("keys")) {
         for (auto it = j["keys"].begin(); it != j["keys"].end(); ++it) {
             KeyConfig kc;
-            kc.name  = it->value("name", std::string{});
-            kc.qps   = it->value("qps", 1.0);
-            kc.burst = it->value("burst", 5.0);
-            g_keys[it.key()] = kc;
+            kc.name       = it->value("name", std::string{});
+            kc.qps        = it->value("qps", 1.0);
+            kc.burst      = it->value("burst", 5.0);
+            kc.is_default = it->value("default", false);
+            if (it->contains("ip_limits")) {
+                for (const auto& lim : (*it)["ip_limits"]) {
+                    double reqs = lim.value("requests", 0.0);
+                    double per  = lim.value("per_seconds", 0.0);
+                    if (reqs <= 0 || per <= 0) continue;
+                    kc.ip_limits.push_back({ reqs / per, reqs });
+                }
+            }
+            if (kc.is_default && g_default_key.empty()) g_default_key = it.key();
+            g_keys[it.key()] = std::move(kc);
         }
     }
-    log::info("auth: loaded %zu key(s); public qps=%g burst=%g",
-              g_keys.size(), g_public.qps, g_public.burst);
+    log::info("auth: loaded %zu key(s); public qps=%g burst=%g; default-key=%s",
+              g_keys.size(), g_public.qps, g_public.burst,
+              g_default_key.empty() ? "(none)" : "(set)");
+}
+
+std::string default_api_key() {
+    return g_default_key;
 }
 
 AuthDecision check_auth(const AuthRequest& req) {
@@ -142,6 +194,29 @@ AuthDecision check_auth(const AuthRequest& req) {
             d.body = deny_body("rate limit exceeded for this api key");
             d.retry_after_seconds = retry;
             return d;
+        }
+        // Per-IP-per-key limits (e.g. the public-trial key shipped with
+        // the installer: 10/min and 100/hour per source IP). All buckets
+        // must allow; otherwise return the longest retry-after.
+        if (!it->second.ip_limits.empty()) {
+            std::string ip = req.source_ip.empty() ? "unknown" : req.source_ip;
+            auto& buckets = key_ip_buckets(req.api_key, ip, it->second.ip_limits);
+            std::size_t consumed_until = 0;
+            int retry = 0;
+            for (std::size_t i = 0; i < buckets.size(); ++i) {
+                if (!buckets[i]->try_consume(retry)) {
+                    // Refund the buckets we already consumed from before
+                    // hitting this denial so we don't leak tokens.
+                    for (std::size_t j = 0; j < consumed_until; ++j) buckets[j]->refund();
+                    d.allowed = false;
+                    d.status = 429;
+                    d.status_text = "Too Many Requests";
+                    d.body = deny_body("per-IP rate limit exceeded for this api key");
+                    d.retry_after_seconds = retry;
+                    return d;
+                }
+                consumed_until = i + 1;
+            }
         }
         return d;
     }

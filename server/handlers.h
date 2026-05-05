@@ -28,6 +28,11 @@ void handle_voices(StreamWriter& out);
 // Cheap and unauthenticated — meant for liveness probes / load balancers.
 void handle_health(StreamWriter& out);
 
+// GET /api/default-key → JSON {"api_key":"<key>"} or {"api_key":""}.
+// Unauthenticated; used by the bundled web client to pick up whatever
+// public-trial key the installer wrote into keys.json.
+void handle_default_key(StreamWriter& out);
+
 // GET /synthesize?text=...&voice=...&format=...&...
 // Streams encoded audio (and optional events for ogg) as bytes are produced.
 void handle_synthesize(const std::wstring& query_string, StreamWriter& out);

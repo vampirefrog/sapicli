@@ -186,6 +186,9 @@ void dispatch(HANDLE queue, const HTTP_REQUEST* req) {
     if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/health")) {
         handle_health(w);                    // unauthenticated liveness probe
     }
+    else if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/api/default-key")) {
+        handle_default_key(w);               // unauthenticated; returns the public-trial key
+    }
     else if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/voices")) {
         handle_voices(w);                    // unauthenticated, cheap
     }
@@ -351,8 +354,9 @@ int run_http_server(const HttpConfig& cfg) {
     return 0;
 }
 
-int run_server() {
+int run_server(int port) {
     HttpConfig cfg;
+    cfg.url_prefix = L"http://+:" + std::to_wstring(port) + L"/";
     // Resolve keys.json path: env override, else %ProgramData%\sapicli\keys.json.
     std::wstring keys_path;
     wchar_t override_buf[MAX_PATH] = {0};
