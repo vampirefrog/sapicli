@@ -1,24 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   WiX v5 source for the sapisrv Windows Installer.
-
-  Build (locally or in CI):
-    dotnet tool install --global wix --version 5.*
-    wix build deploy\sapisrv.wxs ^
-      -d DistDir=dist ^
-      -d Version=0.1.0 ^
-      -arch x64 ^
-      -o dist\sapisrv-setup.msi
-
-  Silent install / upgrade / uninstall:
-    msiexec /i sapisrv-setup.msi /quiet /norestart
-    msiexec /x sapisrv-setup.msi /quiet /norestart
-    msiexec /i sapisrv-setup.msi /lv* install.log /quiet      (verbose log)
+  See deploy/README.md for the build / install / uninstall commands.
 
   Layout the installer expects under DistDir (the build workflow stages this):
     dist/
       sapicli.exe
       sapisrv.exe
+      keys.default.json
       www/...                          (web client + WASM)
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
@@ -64,25 +53,25 @@
 
       <!-- sapisrv.exe + Windows Service registration + start/stop control -->
       <Component Directory="INSTALLFOLDER">
-        <File Id="SapisrvExe" Source="$(var.DistDir)\sapisrv.exe" KeyPath="yes">
-          <ServiceInstall
-            Name="sapisrv"
-            DisplayName="sapicli SAPI HTTP Server"
-            Description="Serves SAPI text-to-speech over HTTP, with parallel speech-event multiplexing."
-            Type="ownProcess"
-            Start="auto"
-            ErrorControl="normal"
-            Account="NT AUTHORITY\NetworkService"
-            Arguments="run"
-            Vital="yes" />
-          <ServiceControl
-            Id="ControlSapisrv"
-            Name="sapisrv"
-            Start="install"
-            Stop="both"
-            Remove="uninstall"
-            Wait="yes" />
-        </File>
+        <File Id="SapisrvExe" Source="$(var.DistDir)\sapisrv.exe" KeyPath="yes" />
+        <ServiceInstall
+          Id="SapisrvServiceInstall"
+          Name="sapisrv"
+          DisplayName="sapicli SAPI HTTP Server"
+          Description="Serves SAPI text-to-speech over HTTP, with parallel speech-event multiplexing."
+          Type="ownProcess"
+          Start="auto"
+          ErrorControl="normal"
+          Account="NT AUTHORITY\NetworkService"
+          Arguments="run"
+          Vital="yes" />
+        <ServiceControl
+          Id="ControlSapisrv"
+          Name="sapisrv"
+          Start="install"
+          Stop="both"
+          Remove="uninstall"
+          Wait="yes" />
       </Component>
 
       <!-- Web UI (HTML/CSS/JS + WASM + sprites). Auto-harvested into www/ -->
@@ -113,18 +102,19 @@
     <!-- ===== Custom actions: URL ACL ===== -->
     <!-- HTTP API on Windows requires an explicit URL reservation per-account.
          The service runs as NetworkService, so we reserve the prefix for that
-         account. Both actions run deferred + non-impersonated so they execute
-         in the elevated SYSTEM context the MSI provides; netsh's exit code is
-         ignored so a stale reservation on uninstall (or a duplicate on
-         install) doesn't roll back the whole install. -->
-    <Property Id="NETSH_EXE" Value="netsh.exe" />
+         account. We delete-then-add to make the install idempotent on dev
+         machines where a previous reservation may exist (under a different
+         user); without this, netsh's "URL is already reserved" failure would
+         be silently swallowed and the service would refuse to bind on start.
+         All actions run deferred + non-impersonated so they execute in the
+         elevated SYSTEM context the MSI provides. -->
 
-    <CustomAction Id="AddUrlAcl"
+    <CustomAction Id="ResetUrlAcl"
       Directory="INSTALLFOLDER"
-      ExeCommand='netsh http add urlacl url=http://+:8080/ user="NT AUTHORITY\NetworkService"'
+      ExeCommand='cmd.exe /c "netsh http delete urlacl url=http://+:8080/ &amp; netsh http add urlacl url=http://+:8080/ user=&quot;NT AUTHORITY\NetworkService&quot;"'
       Execute="deferred"
       Impersonate="no"
-      Return="ignore" />
+      Return="check" />
 
     <CustomAction Id="RemoveUrlAcl"
       Directory="INSTALLFOLDER"
@@ -134,8 +124,11 @@
       Return="ignore" />
 
     <InstallExecuteSequence>
-      <Custom Action="AddUrlAcl"    After="InstallServices" Condition="NOT Installed" />
-      <Custom Action="RemoveUrlAcl" Before="RemoveFiles"    Condition="REMOVE=&quot;ALL&quot;" />
+      <!-- Reset on every install/upgrade/repair so a stale ACL can't strand -->
+      <!-- the service. Run before InstallServices so the service start that  -->
+      <!-- WiX schedules right after has a working reservation in place.      -->
+      <Custom Action="ResetUrlAcl"  Before="InstallServices" Condition="NOT REMOVE" />
+      <Custom Action="RemoveUrlAcl" Before="RemoveFiles"     Condition="REMOVE=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
   </Package>
