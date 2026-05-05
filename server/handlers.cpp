@@ -2,6 +2,10 @@
 
 #include "core/voices.h"
 
+#include <windows.h>
+
+#include <chrono>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 
@@ -74,6 +78,19 @@ void handle_voices(StreamWriter& out) {
         out.write(body.data(), body.size());
         out.finish();
     }
+}
+
+void handle_health(StreamWriter& out) {
+    using clock = std::chrono::steady_clock;
+    static const auto start = clock::now();
+    long long up_s = std::chrono::duration_cast<std::chrono::seconds>(clock::now() - start).count();
+    char body[128];
+    int n = _snprintf_s(body, sizeof(body), _TRUNCATE,
+                        "{\"status\":\"ok\",\"pid\":%lu,\"uptime_s\":%lld}",
+                        GetCurrentProcessId(), up_s);
+    out.start(200, "OK", "application/json; charset=utf-8");
+    if (n > 0) out.write(body, n);
+    out.finish();
 }
 
 }  // namespace sapisrv

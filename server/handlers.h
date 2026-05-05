@@ -24,6 +24,10 @@ public:
 // GET /voices  → JSON array of available SAPI voices (buffered, single chunk).
 void handle_voices(StreamWriter& out);
 
+// GET /health  → 200 with JSON {"status":"ok","pid":N,"uptime_s":N}.
+// Cheap and unauthenticated — meant for liveness probes / load balancers.
+void handle_health(StreamWriter& out);
+
 // GET /synthesize?text=...&voice=...&format=...&...
 // Streams encoded audio (and optional events for ogg) as bytes are produced.
 void handle_synthesize(const std::wstring& query_string, StreamWriter& out);

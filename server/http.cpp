@@ -162,6 +162,12 @@ AuthRequest extract_auth_request(const HTTP_REQUEST* req) {
 }
 
 void dispatch(HANDLE queue, const HTTP_REQUEST* req) {
+    if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/health")) {
+        // Liveness probe — no auth, no work.
+        HttpStreamWriter w(queue, req->RequestId);
+        handle_health(w);
+        return;
+    }
     if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/voices")) {
         HttpStreamWriter w(queue, req->RequestId);
         handle_voices(w);

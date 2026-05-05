@@ -65,8 +65,11 @@ void emit(const char* level, const char* fmt, va_list ap) {
                             prefix, body);
     if (total < 0) total = static_cast<int>(strlen(line));
 
-    fwrite(line, 1, total, stderr);
-    fflush(stderr);
+    // In console mode the user wants the lines on the terminal; in service
+    // mode stdout is closed and the write is a silent no-op. Either way,
+    // the rolling file below is the durable copy.
+    fwrite(line, 1, total, stdout);
+    fflush(stdout);
 
     std::lock_guard<std::mutex> lk(g_mu);
     ensure_open_locked();
@@ -90,8 +93,14 @@ void init(const std::wstring& log_dir) {
         }
     }
     CreateDirectoryW(g_dir.c_str(), nullptr);
-    std::lock_guard<std::mutex> lk(g_mu);
-    ensure_open_locked();
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        ensure_open_locked();
+    }
+    // Tell the operator where we're writing — useful in console mode and
+    // visible in the file itself for service mode.
+    auto path = file_path_for(g_open_yyyymmdd);
+    info("logging to %ls", path.c_str());
 }
 
 void info (const char* fmt, ...) { va_list ap; va_start(ap, fmt); emit("INFO ", fmt, ap); va_end(ap); }
