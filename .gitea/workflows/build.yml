@@ -70,7 +70,7 @@ jobs:
           Copy-Item x64\Release\sapicli.exe $dist\
           Copy-Item x64\Release\sapisrv.exe $dist\
           Copy-Item -Recurse www $dist\www
-          Copy-Item deploy\keys.default.json $dist\
+          Copy-Item deploy\gen-keys.ps1 $dist\
           Copy-Item deploy\License.rtf $dist\
 
       # ---- MSI build (WiX v5 via dotnet tool) ----------------------------
@@ -103,11 +103,14 @@ jobs:
       - name: build msi
         shell: pwsh
         run: |
-          # WixToolset.UI.wixext is needed for the WixUI_Minimal dialog set.
-          # Pin to 5.x; the unversioned latest is 7.x which is WiX-v7 only.
+          # WixToolset.UI.wixext   -> WixUI_Minimal dialog set
+          # WixToolset.Util.wixext -> WixShellExec custom action ("Open in browser")
+          # Pin both to 5.x; the unversioned latest is 7.x which is WiX-v7 only.
           wix extension add -g WixToolset.UI.wixext/5.0.2
+          wix extension add -g WixToolset.Util.wixext/5.0.2
           wix build deploy\sapisrv.wxs `
             -ext WixToolset.UI.wixext `
+            -ext WixToolset.Util.wixext `
             -d "DistDir=$pwd\dist" `
             -d "Version=${{ steps.ver.outputs.version }}" `
             -arch x64 `

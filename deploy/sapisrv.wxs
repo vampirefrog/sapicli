@@ -40,6 +40,31 @@
     <ui:WixUI Id="WixUI_Minimal" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui" />
     <WixVariable Id="WixUILicenseRtf" Value="$(var.DistDir)\License.rtf" />
 
+    <!-- Optional checkbox on the Finish dialog: "Open in browser". -->
+    <!-- The service is already started by InstallServices/ServiceControl -->
+    <!-- by the time the user sees this dialog, so launching the URL just  -->
+    <!-- works (modulo a few hundred ms of HTTP-listener warm-up that the  -->
+    <!-- user spends reading the dialog).                                  -->
+    <!-- WixShellExec lives in WixToolset.Util.wixext; build line needs    -->
+    <!-- `-ext WixToolset.Util.wixext` alongside the UI extension.         -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Open the sapisrv web UI in my browser" />
+    <!-- Set WixShellExecTarget at runtime so [PORT] formats from the live -->
+    <!-- session properties (a default Property value is a literal string  -->
+    <!-- and would put the brackets straight into the URL).                -->
+    <CustomAction Id="SetLaunchTarget" Property="WixShellExecTarget"
+                  Value="http://localhost:[PORT]/" />
+    <CustomAction Id="LaunchBrowser" DllEntry="WixShellExec" Impersonate="yes"
+                  BinaryRef="Wix4UtilCA_X64" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="SetLaunchTarget"
+               Order="998"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchBrowser"
+               Order="999"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
+
     <!-- Install root: %ProgramFiles%\sapisrv\ -->
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="sapisrv" />
@@ -63,6 +88,13 @@
       <!-- CLI tool (no service, just an installed binary) -->
       <Component Directory="INSTALLFOLDER">
         <File Source="$(var.DistDir)\sapicli.exe" />
+      </Component>
+
+      <!-- Helper script for first-install keys.json generation. Stays on -->
+      <!-- disk after install so an operator can re-run it manually to    -->
+      <!-- regenerate the public-trial key.                                -->
+      <Component Directory="INSTALLFOLDER">
+        <File Id="GenKeysScript" Source="$(var.DistDir)\gen-keys.ps1" />
       </Component>
 
       <!-- sapisrv.exe + Windows Service registration + start/stop control -->
@@ -95,18 +127,13 @@
     <!-- ===== Files in ProgramData ===== -->
     <ComponentGroup Id="ProgramDataGroup">
 
-      <!-- Default keys.json. NeverOverwrite preserves edits across upgrades; -->
-      <!-- the file is intentionally left behind on uninstall (Permanent="yes") -->
-      <!-- so an operator who removes/reinstalls doesn't lose their key list. -->
-      <Component Id="DefaultKeysJson" Directory="ProgramDataSapicli"
-                 Guid="b2a3b4c5-6d7e-8f90-a1b2-c3d4e5f60718"
-                 NeverOverwrite="yes" Permanent="yes">
-        <File Source="$(var.DistDir)\keys.default.json" Name="keys.json" KeyPath="yes" />
+      <!-- Make sure ProgramData\sapicli\ and the logs subdir exist. Both -->
+      <!-- are Permanent="yes" so uninstall doesn't take the operator's   -->
+      <!-- keys.json or accumulated logs with it.                          -->
+      <Component Id="SapicliDir" Directory="ProgramDataSapicli"
+                 Guid="b2a3b4c5-6d7e-8f90-a1b2-c3d4e5f60718" Permanent="yes">
+        <CreateFolder />
       </Component>
-
-      <!-- Make sure ProgramData\sapicli\logs\ exists (the logger creates it -->
-      <!-- on its own, but registering it here makes uninstall well-behaved   -->
-      <!-- and lets sysadmins set ACLs on it as part of MSI deployment).     -->
       <Component Id="LogsDir" Directory="ProgramDataSapicliLogs"
                  Guid="c3b4c5d6-7e8f-90a1-b2c3-d4e5f6071829" Permanent="yes">
         <CreateFolder />
@@ -136,12 +163,25 @@
       Execute="immediate"
       Return="ignore" />
 
+    <!-- Run gen-keys.ps1 once on first install to write a randomised        -->
+    <!-- keys.json with a public-trial key. The script no-ops if keys.json   -->
+    <!-- already exists, so re-running is safe across upgrades and repairs.  -->
+    <CustomAction Id="GenerateKeysJson"
+      Directory="INSTALLFOLDER"
+      ExeCommand='powershell.exe -NoProfile -ExecutionPolicy Bypass -File "[INSTALLFOLDER]gen-keys.ps1"'
+      Execute="deferred"
+      Impersonate="no"
+      Return="check" />
+
     <InstallExecuteSequence>
       <!-- Reset on every install/upgrade/repair so a stale ACL can't strand -->
       <!-- the service. Run before InstallServices so the service start that  -->
       <!-- WiX schedules right after has a working reservation in place.      -->
-      <Custom Action="ResetUrlAcl"  Before="InstallServices" Condition="NOT REMOVE" />
-      <Custom Action="RemoveUrlAcl" Before="RemoveFiles"     Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="ResetUrlAcl"      Before="InstallServices" Condition="NOT REMOVE" />
+      <!-- Generate keys.json after the script lands in INSTALLFOLDER but    -->
+      <!-- before InstallServices so the service starts with auth ready.     -->
+      <Custom Action="GenerateKeysJson" After="InstallFiles"     Condition="NOT REMOVE" />
+      <Custom Action="RemoveUrlAcl"     Before="RemoveFiles"     Condition="REMOVE=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
   </Package>
