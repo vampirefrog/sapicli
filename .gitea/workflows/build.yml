@@ -21,16 +21,13 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      # ---- vcpkg manifest install (libogg/vorbis/opus/mp3lame/nlohmann-json) -
-      # We can't rely on `vcpkg integrate install` because it's per-user and
-      # the runner runs as LocalSystem (whose profile has no vcpkg integ).
-      # Calling `vcpkg install` explicitly here populates vcpkg_installed/
-      # which the vcxproj's AdditionalIncludeDirectories points at.
-      - name: vcpkg install (manifest mode)
-        run: |
-          C:\vcpkg\vcpkg.exe install --triplet=x64-windows-static --x-manifest-root=.
-
       # ---- native build (sapicore.lib + sapicli.exe + sapisrv.exe) -------
+      # Each .vcxproj imports $(VCPKG_ROOT)\scripts\buildsystems\msbuild\
+      # vcpkg.targets, which (with VcpkgEnableManifest=true) runs
+      # `vcpkg install` against vcpkg.json before compilation and adds the
+      # right include/lib paths and lib filenames to the linker. So we
+      # don't need a separate explicit `vcpkg install` step -- VCPKG_ROOT
+      # in the env is enough.
       - name: msbuild Release|x64
         env:
           VCPKG_ROOT: C:\vcpkg

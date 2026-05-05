@@ -91,4 +91,8 @@
     <ClInclude Include="muxaudio\include\mux.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <!-- Pull vcpkg's msbuild integration directly so manifest-mode install -->
+  <!-- runs at build time without needing per-user `vcpkg integrate       -->
+  <!-- install`. VCPKG_ROOT must be set in the build environment.         -->
+  <Import Project="$(VCPKG_ROOT)\scripts\buildsystems\msbuild\vcpkg.targets" Condition="'$(VCPKG_ROOT)' != '' and Exists('$(VCPKG_ROOT)\scripts\buildsystems\msbuild\vcpkg.targets')" />
 </Project>
