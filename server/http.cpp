@@ -12,6 +12,7 @@
 #include "static.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -52,6 +53,9 @@ public:
         const char* p = static_cast<const char*>(data);
         buffer_.insert(buffer_.end(), p, p + len);
     }
+
+    int status() const { return status_; }
+    std::size_t bytes() const { return buffer_.size(); }
 
     void finish() override {
         if (finished_) return;
@@ -95,19 +99,32 @@ bool path_equals(const HTTP_COOKED_URL& url, const wchar_t* p) {
     return wcsncmp(url.pAbsPath, p, plen) == 0;
 }
 
-void send_simple(HANDLE queue, HTTP_REQUEST_ID req_id, int status, const char* text) {
-    HttpStreamWriter w(queue, req_id);
+// In-place equivalents of send_simple/send_json now that dispatch owns the
+// writer and we want all paths to flow through a single instance for logging.
+void reply_text(HttpStreamWriter& w, int status, const char* text) {
     w.start(status, text, "text/plain; charset=utf-8");
     w.write(text, strlen(text));
     w.finish();
 }
-
-void send_json(HANDLE queue, HTTP_REQUEST_ID req_id, int status, const char* status_text,
-               const std::string& body) {
-    HttpStreamWriter w(queue, req_id);
+void reply_json(HttpStreamWriter& w, int status, const char* status_text,
+                const std::string& body) {
     w.start(status, status_text, "application/json; charset=utf-8");
     w.write(body.data(), body.size());
     w.finish();
+}
+
+const char* verb_name(HTTP_VERB v) {
+    switch (v) {
+        case HttpVerbGET:     return "GET";
+        case HttpVerbPOST:    return "POST";
+        case HttpVerbHEAD:    return "HEAD";
+        case HttpVerbPUT:     return "PUT";
+        case HttpVerbDELETE:  return "DELETE";
+        case HttpVerbOPTIONS: return "OPTIONS";
+        case HttpVerbTRACE:   return "TRACE";
+        case HttpVerbCONNECT: return "CONNECT";
+        default:              return "?";
+    }
 }
 
 std::string sockaddr_to_string(const SOCKADDR* sa) {
@@ -162,41 +179,57 @@ AuthRequest extract_auth_request(const HTTP_REQUEST* req) {
 }
 
 void dispatch(HANDLE queue, const HTTP_REQUEST* req) {
+    auto t0 = std::chrono::steady_clock::now();
+    HttpStreamWriter w(queue, req->RequestId);
+    AuthRequest authreq = extract_auth_request(req);
+
     if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/health")) {
-        // Liveness probe — no auth, no work.
-        HttpStreamWriter w(queue, req->RequestId);
-        handle_health(w);
-        return;
+        handle_health(w);                    // unauthenticated liveness probe
     }
-    if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/voices")) {
-        HttpStreamWriter w(queue, req->RequestId);
-        handle_voices(w);
-        return;
+    else if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/voices")) {
+        handle_voices(w);                    // unauthenticated, cheap
     }
-    if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/synthesize")) {
-        AuthDecision auth = check_auth(extract_auth_request(req));
+    else if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/synthesize")) {
+        AuthDecision auth = check_auth(authreq);
         if (!auth.allowed) {
-            send_json(queue, req->RequestId, auth.status, auth.status_text, auth.body);
-            return;
+            reply_json(w, auth.status, auth.status_text, auth.body);
+        } else {
+            std::wstring qs;
+            if (req->CookedUrl.pQueryString && req->CookedUrl.QueryStringLength) {
+                qs.assign(req->CookedUrl.pQueryString,
+                          req->CookedUrl.QueryStringLength / sizeof(wchar_t));
+            }
+            handle_synthesize(qs, w);
         }
-        HttpStreamWriter w(queue, req->RequestId);
-        std::wstring qs;
+    }
+    else if (req->Verb == HttpVerbGET && req->CookedUrl.pAbsPath) {
+        std::wstring p(req->CookedUrl.pAbsPath,
+                       req->CookedUrl.AbsPathLength / sizeof(wchar_t));
+        handle_static(p, w);                 // catchall: static web files
+    }
+    else {
+        reply_text(w, 404, "Not Found");
+    }
+
+    // Per-request access log: METHOD path?qs -> status bytes ms ip key
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - t0).count();
+    std::wstring path_qs;
+    if (req->CookedUrl.pAbsPath) {
+        path_qs.assign(req->CookedUrl.pAbsPath,
+                       req->CookedUrl.AbsPathLength / sizeof(wchar_t));
         if (req->CookedUrl.pQueryString && req->CookedUrl.QueryStringLength) {
-            qs.assign(req->CookedUrl.pQueryString,
-                      req->CookedUrl.QueryStringLength / sizeof(wchar_t));
+            path_qs.append(req->CookedUrl.pQueryString,
+                           req->CookedUrl.QueryStringLength / sizeof(wchar_t));
         }
-        handle_synthesize(qs, w);
-        return;
     }
-    // Catchall: serve static files for GET (web UI). Anything else → 404.
-    if (req->Verb == HttpVerbGET && req->CookedUrl.pAbsPath) {
-        std::wstring path(req->CookedUrl.pAbsPath,
-                          req->CookedUrl.AbsPathLength / sizeof(wchar_t));
-        HttpStreamWriter w(queue, req->RequestId);
-        handle_static(path, w);
-        return;
-    }
-    send_simple(queue, req->RequestId, 404, "Not Found");
+    std::string keytag = authreq.api_key.empty()
+        ? std::string("anon")
+        : std::string("key:") + authreq.api_key.substr(0, 8);
+    log::info("%s %ls -> %d %zuB %lldms ip=%s %s",
+              verb_name(req->Verb), path_qs.c_str(),
+              w.status(), w.bytes(), (long long)ms,
+              authreq.source_ip.c_str(), keytag.c_str());
 }
 
 void worker_loop(HANDLE queue) {
