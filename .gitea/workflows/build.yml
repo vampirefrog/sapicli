@@ -32,7 +32,11 @@ jobs:
       # filenames so they don't need the auto-resolution either.
       - name: vcpkg install (manifest mode)
         run: |
-          C:\vcpkg\vcpkg.exe install --triplet=x64-windows-static --x-manifest-root=.
+          REM --x-install-root mirrors the double-triplet layout msbuild's
+          REM vcpkg integration produces locally (vcpkg_installed/x64-windows-
+          REM static/x64-windows-static/include/...), so the include + lib
+          REM paths in the vcxprojs match in both environments.
+          C:\vcpkg\vcpkg.exe install --triplet=x64-windows-static --x-manifest-root=. --x-install-root=.\vcpkg_installed\x64-windows-static
 
       - name: msbuild Release|x64
         run: |
