@@ -166,9 +166,17 @@
     <!-- Run gen-keys.ps1 once on first install to write a randomised        -->
     <!-- keys.json with a public-trial key. The script no-ops if keys.json   -->
     <!-- already exists, so re-running is safe across upgrades and repairs.  -->
+    <!--                                                                      -->
+    <!-- Two CAs: Type 51 SetGenKeysData stuffs INSTALLFOLDER into the named  -->
+    <!-- property "GenerateKeysJson", which becomes [CustomActionData] when   -->
+    <!-- the deferred CA of the same name runs. Deferred CAs can't see        -->
+    <!-- session properties directly: referencing [INSTALLFOLDER] in          -->
+    <!-- ExeCommand resolves to empty string and PowerShell then can't find   -->
+    <!-- the script.                                                           -->
+    <CustomAction Id="SetGenKeysData" Property="GenerateKeysJson" Value="[INSTALLFOLDER]" />
     <CustomAction Id="GenerateKeysJson"
       Directory="INSTALLFOLDER"
-      ExeCommand='powershell.exe -NoProfile -ExecutionPolicy Bypass -File "[INSTALLFOLDER]gen-keys.ps1"'
+      ExeCommand='powershell.exe -NoProfile -ExecutionPolicy Bypass -File "[CustomActionData]gen-keys.ps1"'
       Execute="deferred"
       Impersonate="no"
       Return="check" />
@@ -178,9 +186,12 @@
       <!-- the service. Run before InstallServices so the service start that  -->
       <!-- WiX schedules right after has a working reservation in place.      -->
       <Custom Action="ResetUrlAcl"      Before="InstallServices" Condition="NOT REMOVE" />
-      <!-- Generate keys.json after the script lands in INSTALLFOLDER but    -->
-      <!-- before InstallServices so the service starts with auth ready.     -->
-      <Custom Action="GenerateKeysJson" After="InstallFiles"     Condition="NOT REMOVE" />
+      <!-- SetGenKeysData must precede GenerateKeysJson so the latter sees    -->
+      <!-- a populated CustomActionData. Both run after InstallFiles so the   -->
+      <!-- script is on disk, then before InstallServices so keys.json        -->
+      <!-- exists when the service starts.                                     -->
+      <Custom Action="SetGenKeysData"   After="InstallFiles"     Condition="NOT REMOVE" />
+      <Custom Action="GenerateKeysJson" After="SetGenKeysData"   Condition="NOT REMOVE" />
       <Custom Action="RemoveUrlAcl"     Before="RemoveFiles"     Condition="REMOVE=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
