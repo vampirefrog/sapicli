@@ -1,0 +1,70 @@
+name: build
+
+on:
+  push:
+    branches: [master, redesign]
+    tags:     ["v*"]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: [self-hosted, windows, x64]
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+      - name: checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      # ---- native build (sapicore.lib + sapicli.exe + sapisrv.exe) -------
+      - name: msbuild Release|x64 (vcpkg manifest installs ffmpeg deps on first run)
+        env:
+          VCPKG_ROOT: C:\vcpkg
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          msbuild sapicli.sln -p:Configuration=Release -p:Platform=x64 -nologo -m -v:minimal
+
+      - name: smoke test sapicli --list
+        run: x64\Release\sapicli.exe --list
+
+      # ---- WASM build (muxaudio.js + muxaudio.wasm) ----------------------
+      # cmake/ninja/python are on PATH (installed by runner-setup.ps1 via
+      # winget). emsdk is at C:\emsdk. Build into muxaudio/build-wasm/, then
+      # copy artifacts into www/ so the staging step picks them up.
+      - name: build muxaudio WASM
+        shell: pwsh
+        run: |
+          $build = "$pwd\muxaudio\build-wasm"
+          & cmd /c "C:\emsdk\emsdk_env.bat >nul 2>nul && emcmake.bat cmake `"$pwd\muxaudio`" -B `"$build`" -G Ninja -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCODEC_VORBIS=ON -DCODEC_OPUS=ON -DCODEC_MP3=ON -DCODEC_MP3_DECODE=ON -DCODEC_MP3_ENCODE=OFF -DCMAKE_BUILD_TYPE=Release"
+          if ($LASTEXITCODE -ne 0) { throw "emcmake failed" }
+          & cmd /c "C:\emsdk\emsdk_env.bat >nul 2>nul && cmake --build `"$build`" --target muxaudio"
+          if ($LASTEXITCODE -ne 0) { throw "wasm build failed" }
+          Copy-Item "$build\muxaudio.js","$build\muxaudio.wasm" www/ -Force
+
+      # ---- assemble dist/ ------------------------------------------------
+      - name: stage dist/
+        shell: pwsh
+        run: |
+          $dist = "$pwd\dist"
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          Copy-Item x64\Release\sapicli.exe $dist\
+          Copy-Item x64\Release\sapisrv.exe $dist\
+          Copy-Item -Recurse www $dist\www
+          Copy-Item -Recurse deploy $dist\deploy
+
+      - name: upload dist artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: sapicli-dist-${{ github.sha }}
+          path: dist/
+          retention-days: 14
+
+  # The deploy job will land in a follow-up commit alongside Step 3
+  # (Install-Service.ps1 / Deploy-Remote.ps1). Once those exist, this stub
+  # becomes a real job that downloads the artifact and runs Deploy-Remote
+  # against the prod VM via PSRemoting on tag pushes only.

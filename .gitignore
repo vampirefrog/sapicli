@@ -8,3 +8,5 @@ vcpkg_installed/
 .build.bat
 .build.log
 .build.log.err
+dist/
+muxaudio/build-wasm/
