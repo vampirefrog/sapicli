@@ -147,13 +147,25 @@
          install would silently be left with a stale ACL the service can't
          bind through.
 
+         Two separate CAs (one delete, one add) instead of one cmd.exe wrapper:
+         the wrapped form `cmd /c "netsh ... & netsh ..."` trips cmd's
+         old-vs-new quote-handling rules on older Windows versions (Win 8.1 /
+         Server 2012 R2 returned 1721 "a program required for this install
+         could not be run" on the multi-quote / & combo).
+
          Execute="immediate" (not deferred) so [PORT] resolves at format-time
          from the session properties; the per-machine MSI session already
          runs elevated so netsh has the rights it needs. -->
 
-    <CustomAction Id="ResetUrlAcl"
+    <CustomAction Id="DeleteStaleUrlAcl"
       Directory="INSTALLFOLDER"
-      ExeCommand='cmd.exe /c "netsh http delete urlacl url=http://+:[PORT]/ &amp; netsh http add urlacl url=http://+:[PORT]/ user=&quot;NT AUTHORITY\NetworkService&quot;"'
+      ExeCommand='netsh http delete urlacl url=http://+:[PORT]/'
+      Execute="immediate"
+      Return="ignore" />
+
+    <CustomAction Id="AddUrlAcl"
+      Directory="INSTALLFOLDER"
+      ExeCommand='netsh http add urlacl url=http://+:[PORT]/ user="NT AUTHORITY\NetworkService"'
       Execute="immediate"
       Return="check" />
 
@@ -183,16 +195,18 @@
 
     <InstallExecuteSequence>
       <!-- Reset on every install/upgrade/repair so a stale ACL can't strand -->
-      <!-- the service. Run before InstallServices so the service start that  -->
-      <!-- WiX schedules right after has a working reservation in place.      -->
-      <Custom Action="ResetUrlAcl"      Before="InstallServices" Condition="NOT REMOVE" />
+      <!-- the service. Delete (ignore-error) then Add (check), both before  -->
+      <!-- InstallServices so the start that WiX schedules right after sees  -->
+      <!-- a working reservation.                                             -->
+      <Custom Action="DeleteStaleUrlAcl" Before="AddUrlAcl"        Condition="NOT REMOVE" />
+      <Custom Action="AddUrlAcl"         Before="InstallServices"  Condition="NOT REMOVE" />
       <!-- SetGenKeysData must precede GenerateKeysJson so the latter sees    -->
       <!-- a populated CustomActionData. Both run after InstallFiles so the   -->
       <!-- script is on disk, then before InstallServices so keys.json        -->
       <!-- exists when the service starts.                                     -->
-      <Custom Action="SetGenKeysData"   After="InstallFiles"     Condition="NOT REMOVE" />
-      <Custom Action="GenerateKeysJson" After="SetGenKeysData"   Condition="NOT REMOVE" />
-      <Custom Action="RemoveUrlAcl"     Before="RemoveFiles"     Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="SetGenKeysData"   After="InstallFiles"      Condition="NOT REMOVE" />
+      <Custom Action="GenerateKeysJson" After="SetGenKeysData"    Condition="NOT REMOVE" />
+      <Custom Action="RemoveUrlAcl"     Before="RemoveFiles"      Condition="REMOVE=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
   </Package>
