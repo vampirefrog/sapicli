@@ -26,6 +26,14 @@
     <MediaTemplate EmbedCab="yes" />
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
 
+    <!-- UI: WixUI_Minimal gives a single Welcome+License dialog with an -->
+    <!-- Install button, then progress, then a Finish (Exit) dialog so   -->
+    <!-- the user gets visual confirmation that the install succeeded.   -->
+    <!-- Requires the WixToolset.UI.wixext extension at build time:      -->
+    <!--   wix build ... -ext WixToolset.UI.wixext                       -->
+    <ui:WixUI Id="WixUI_Minimal" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.DistDir)\License.rtf" />
+
     <!-- Install root: %ProgramFiles%\sapisrv\ -->
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="sapisrv" />
