@@ -157,20 +157,26 @@
          from the session properties; the per-machine MSI session already
          runs elevated so netsh has the rights it needs. -->
 
+    <!-- Working directory for these is TARGETDIR (= C:\), not INSTALLFOLDER. -->
+    <!-- Immediate CAs run during script GENERATION, which happens BEFORE     -->
+    <!-- the deferred InstallFiles actually creates INSTALLFOLDER. Pointing   -->
+    <!-- the CA at a nonexistent dir made CreateProcess fail with             -->
+    <!-- ERROR_DIRECTORY (logged by MSI as 1721 "could not be run"). The      -->
+    <!-- working dir doesn't matter; netsh doesn't read cwd.                  -->
     <CustomAction Id="DeleteStaleUrlAcl"
-      Directory="INSTALLFOLDER"
+      Directory="TARGETDIR"
       ExeCommand='netsh http delete urlacl url=http://+:[PORT]/'
       Execute="immediate"
       Return="ignore" />
 
     <CustomAction Id="AddUrlAcl"
-      Directory="INSTALLFOLDER"
+      Directory="TARGETDIR"
       ExeCommand='netsh http add urlacl url=http://+:[PORT]/ user="NT AUTHORITY\NetworkService"'
       Execute="immediate"
       Return="check" />
 
     <CustomAction Id="RemoveUrlAcl"
-      Directory="INSTALLFOLDER"
+      Directory="TARGETDIR"
       ExeCommand='netsh http delete urlacl url=http://+:[PORT]/'
       Execute="immediate"
       Return="ignore" />
