@@ -46,7 +46,13 @@ jobs:
 
       - name: msbuild Release|Win32
         run: |
+          REM vcvars32.bat invokes VsDevCmd.bat which can chdir to
+          REM %USERPROFILE%\source\repos. Snapshot %CD% beforehand and
+          REM restore after so msbuild runs from the workspace and finds
+          REM the relative ClCompile Include= paths in sapicore.vcxproj.
+          set "_WORKSPACE=%CD%"
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars32.bat"
+          cd /d "%_WORKSPACE%"
           msbuild sapicli.sln -p:Configuration=Release -p:Platform=Win32 -p:VcpkgEnableManifest=false -nologo -m -v:minimal
 
       - name: smoke test sapicli --list
