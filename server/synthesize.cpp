@@ -1,4 +1,5 @@
 #include "handlers.h"
+#include "logs.h"
 
 #include "core/encoders/encoder.h"
 #include "core/synth.h"
@@ -171,7 +172,17 @@ void handle_synthesize(const std::wstring& query_string, StreamWriter& out) {
                                                      : sapicli::SpeakMode::Text;
 
     try {
+        // Trace each life-cycle stage so a hang in any one of them shows up
+        // in the access log even though the per-request log line at the end
+        // of dispatch() never fires.
+        log::info("synthesize: enter (format=%ls voice='%ls' events=0x%llx mux=%s)",
+                  fmt->c_str(),
+                  voice.empty() ? L"(default)" : voice.c_str(),
+                  (unsigned long long)events,
+                  multiplex ? "true" : "false");
+
         sapicli::Synthesizer synth;
+        log::info("synthesize: synth ctor ok");
         if (!voice.empty()) synth.set_voice(voice);
         synth.set_rate(rate);
         synth.set_volume(volume);
@@ -207,13 +218,16 @@ void handle_synthesize(const std::wstring& query_string, StreamWriter& out) {
             });
         }
 
+        log::info("synthesize: calling SAPI Speak (%zu chars)", text->size());
         synth.speak(*text, mode);
+        log::info("synthesize: SAPI Speak returned");
         if (encoder) encoder->finish();
         out.finish();
+        log::info("synthesize: done");
     } catch (const std::exception& e) {
         // We may have already sent headers — best-effort: log + close the stream.
         // The client will see truncated audio if synthesis blew up mid-stream.
-        fwprintf(stderr, L"synthesize failed: %hs\n", e.what());
+        log::error("synthesize failed: %hs", e.what());
         out.finish();
     }
 }
