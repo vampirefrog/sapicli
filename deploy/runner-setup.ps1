@@ -65,14 +65,12 @@ if (-not (Test-Admin)) { throw "This script must be run as Administrator." }
 # C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools, and
 # C:\emsdk respectively (set up earlier by hand). cmake / ninja / python
 # go on PATH via winget so the workflow doesn't have to hunt for them.
-# .NET SDK is needed for `dotnet tool install --global wix` (MSI build).
 # NSSM wraps act_runner.exe as a real Windows service (act_runner itself
 # isn't SCM-aware so sc.exe / its own `service install` don't work).
 $Pkgs = @(
   "Kitware.CMake",
   "Ninja-build.Ninja",
   "Python.Python.3.12",
-  "Microsoft.DotNet.SDK.8",
   "NSSM.NSSM",
   # Node is needed by act_runner itself: every Gitea/GitHub Actions
   # JavaScript action (checkout@v4, upload-artifact@v3, etc.) is run
@@ -105,10 +103,6 @@ if (-not (Test-Path $PwshExe) -or $Force) {
   Write-Host "Installing PowerShell 7.5.3 (machine-wide, ADD_PATH=1)..."
   & msiexec /i $PwshMsi /quiet /norestart ADD_PATH=1 | Out-Null
 }
-
-# Install WiX v5 toolset as a dotnet global tool (idempotent).
-Write-Host "dotnet tool install wix (no-op if already present)..."
-& dotnet tool install --global wix --version "5.*" 2>&1 | ForEach-Object { Write-Host $_ }
 
 if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory $InstallDir | Out-Null }
 

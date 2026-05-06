@@ -60,39 +60,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "wasm build failed" }
           Copy-Item "$build\muxaudio.js","$build\muxaudio.wasm" www/ -Force
 
-      # ---- assemble dist/ (binaries, web, and the keys.default.json the
-      #      MSI bundles for first-run installs) -----------------------------
-      - name: stage dist/
-        shell: pwsh
-        run: |
-          $dist = "$pwd\dist"
-          New-Item -ItemType Directory -Force $dist | Out-Null
-          Copy-Item x64\Release\sapicli.exe $dist\
-          Copy-Item x64\Release\sapisrv.exe $dist\
-          Copy-Item -Recurse www $dist\www
-          Copy-Item deploy\gen-keys.ps1 $dist\
-          Copy-Item deploy\License.rtf $dist\
-
-      # ---- MSI build (WiX v5 via dotnet tool) ----------------------------
-      # Install wix inside the workflow rather than depending on runner-
-      # setup.ps1: that script installs wix as a dotnet global tool under
-      # whichever account ran it (lenovo), but actrunner runs as
-      # LocalSystem and won't see it. The workflow steps run as the
-      # service account too, so installing here gives wix.exe a stable
-      # home at $USERPROFILE\.dotnet\tools (LocalSystem profile in CI,
-      # whoever's running it locally otherwise).
-      - name: install wix dotnet tool (idempotent)
-        shell: pwsh
-        run: |
-          $tools = "$env:USERPROFILE\.dotnet\tools"
-          if (-not (Test-Path "$tools\wix.exe")) {
-            dotnet tool install --global wix --version "5.*"
-            if ($LASTEXITCODE -ne 0) { throw "dotnet tool install wix failed" }
-          }
-          # Make wix.exe visible to subsequent steps in this job.
-          $tools | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_PATH
-
-      - name: derive msi version
+      # ---- assemble dist/ + zip it ---------------------------------------
+      # The deploy story is "copy this zip to the target machine, unzip,
+      # run sapisrv.exe install". No MSI; nothing fancy. The version comes
+      # from the tag (v0.1.2 -> 0.1.2) on tag pushes, otherwise 0.0.0 for
+      # branch / PR builds.
+      - name: derive version
         id: ver
         shell: pwsh
         run: |
@@ -100,38 +73,28 @@ jobs:
           $v = if ($tag -match '^v(\d+\.\d+\.\d+)') { $matches[1] } else { '0.0.0' }
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: build msi
+      - name: stage + zip dist/
         shell: pwsh
         run: |
-          # WixToolset.UI.wixext   -> WixUI_Minimal dialog set
-          # WixToolset.Util.wixext -> WixShellExec custom action ("Open in browser")
-          # Pin both to 5.x; the unversioned latest is 7.x which is WiX-v7 only.
-          wix extension add -g WixToolset.UI.wixext/5.0.2
-          wix extension add -g WixToolset.Util.wixext/5.0.2
-          wix build deploy\sapisrv.wxs `
-            -ext WixToolset.UI.wixext `
-            -ext WixToolset.Util.wixext `
-            -d "DistDir=$pwd\dist" `
-            -d "Version=${{ steps.ver.outputs.version }}" `
-            -arch x64 `
-            -o "$pwd\dist\sapisrv-setup.msi"
-          if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
+          $dist = "$pwd\dist"
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          Copy-Item x64\Release\sapicli.exe $dist\
+          Copy-Item x64\Release\sapisrv.exe $dist\
+          Copy-Item -Recurse www $dist\www
+          $zip = "$pwd\sapisrv-${{ steps.ver.outputs.version }}.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          Compress-Archive -Path "$dist\*" -DestinationPath $zip
+          Write-Host "Built $zip ($((Get-Item $zip).Length) bytes)"
 
-      - name: upload dist artifact
+      - name: upload zip artifact
         uses: actions/upload-artifact@v3
         with:
-          name: sapicli-dist-${{ github.sha }}
-          path: dist/
-          retention-days: 14
-
-      - name: upload msi artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: sapisrv-setup-${{ steps.ver.outputs.version }}-${{ github.sha }}.msi
-          path: dist/sapisrv-setup.msi
+          name: sapisrv-${{ steps.ver.outputs.version }}-${{ github.sha }}.zip
+          path: sapisrv-${{ steps.ver.outputs.version }}.zip
           retention-days: 30
 
-  # The deploy job will land in a follow-up commit alongside Step 3
-  # (Install-Service.ps1 / Deploy-Remote.ps1). Once those exist, this stub
-  # becomes a real job that downloads the artifact and runs Deploy-Remote
-  # against the prod VM via PSRemoting on tag pushes only.
+  # Deploy job will land in a follow-up commit. Plan:
+  #   - download the zip artifact
+  #   - PSRemoting to the prod VM
+  #   - stop sapisrv service, copy zip, unzip, start service
+  #   - on tag pushes only.
