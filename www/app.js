@@ -321,7 +321,16 @@ async function speak(opts) {
   try {
     decoded = await decodeWithMuxaudio(codec, new Uint8Array(arrayBuf));
   } catch (e) {
-    status.textContent = 'mux decode failed: ' + e.message;
+    // Extra context for debugging: the emscripten-thrown "index out of
+    // bounds" by itself doesn't say where in the muxaudio call chain it
+    // fired. Log the codec + payload size + a peek at the first bytes
+    // so we can correlate with server-side encoder output.
+    const head = Array.from(new Uint8Array(arrayBuf, 0, Math.min(16, arrayBuf.byteLength)))
+                      .map(b => b.toString(16).padStart(2, '0')).join(' ');
+    console.error('muxaudio decode failed:', e, {
+      codec, mp3Passthrough, sampleRate, channels, bytes: arrayBuf.byteLength, head,
+    });
+    status.textContent = `mux decode (${codec}, ${arrayBuf.byteLength}B) failed: ${e.message}`;
     return;
   }
   const { audio, events: eventBlobs } = decoded;
