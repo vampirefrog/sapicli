@@ -48,16 +48,9 @@
           </select>
         </label>
         <label>Sample rate
-          <select id="sample_rate">
-            <option value="8000">8 kHz</option>
-            <option value="11025">11.025 kHz</option>
-            <option value="16000">16 kHz</option>
-            <option value="22050" selected>22.05 kHz</option>
-            <option value="24000">24 kHz</option>
-            <option value="32000">32 kHz</option>
-            <option value="44100">44.1 kHz</option>
-            <option value="48000">48 kHz</option>
-          </select>
+          <!-- Options are filled in from JS based on the selected format
+               so we don't offer rates the encoder will silently resample. -->
+          <select id="sample_rate"></select>
         </label>
         <label>Channels
           <select id="channels">

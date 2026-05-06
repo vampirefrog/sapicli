@@ -431,6 +431,35 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   $('character').addEventListener('change', (e) => puppet.setCharacter(e.target.value));
 
+  // Each codec has its own native set of sample rates. Offering rates the
+  // encoder doesn't actually support means it silently resamples (opus
+  // pitches anything not in {8,12,16,24,48} kHz). Repopulate the dropdown
+  // every time the format changes so the menu only shows rates that round-
+  // trip cleanly. Defaults pick a middle-of-the-road rate per codec.
+  const RATES = {
+    'ogg+vorbis': { rates: [8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000], def: 22050 },
+    'ogg+opus':   { rates: [8000, 12000, 16000, 24000, 48000],                       def: 24000 },
+    'mp3':        { rates: [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000], def: 22050 },
+  };
+  const fmtName = (hz) => hz % 1000 === 0 ? `${hz / 1000} kHz` : `${(hz / 1000).toFixed(3)} kHz`;
+  function repopulateRates() {
+    const sel = $('sample_rate');
+    const prev = parseInt(sel.value, 10) || 0;
+    const cfg = RATES[$('format').value] || RATES['ogg+vorbis'];
+    sel.innerHTML = '';
+    for (const hz of cfg.rates) {
+      const o = document.createElement('option');
+      o.value = String(hz);
+      o.textContent = fmtName(hz);
+      sel.appendChild(o);
+    }
+    // Try to keep the previous selection if it's still valid; otherwise
+    // pick the format's default.
+    sel.value = cfg.rates.includes(prev) ? String(prev) : String(cfg.def);
+  }
+  $('format').addEventListener('change', repopulateRates);
+  repopulateRates();
+
   // Populate voice list.
   try {
     const r = await fetch('/voices');
