@@ -10,6 +10,16 @@ on:
   # Useful for redeploying without pushing a new commit.
   workflow_dispatch:
 
+# When master gets pushed and then a tag created at the same commit,
+# Gitea fires both events and the workflow runs twice on the same SHA --
+# the build is identical, so cancel the in-flight one when a newer event
+# for the same commit arrives. The tag-push run wins (because it's the
+# later event), which gives us deploy + release in one go instead of
+# two duplicate builds.
+concurrency:
+  group: build-${{ github.sha }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: [self-hosted, windows, x64]
