@@ -46,16 +46,17 @@ jobs:
 
       - name: msbuild Release|Win32
         run: |
-          set "_WORKSPACE=%CD%"
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars32.bat"
-          cd /d "%_WORKSPACE%"
-          echo --- DIAG ---
-          echo CD=%CD%
-          echo _WORKSPACE=%_WORKSPACE%
-          dir core
-          dir sapicore.vcxproj
-          echo --- END DIAG ---
-          msbuild "%_WORKSPACE%\sapicli.sln" -p:Configuration=Release -p:Platform=Win32 -p:VcpkgEnableManifest=false -nologo -m -v:minimal -p:UseEnv=true
+          REM Use the amd64_x86 cross-compiler (64-bit cl.exe targeting x86)
+          REM rather than the 32-bit native cl.exe. The runner's workspace
+          REM lives under C:\Windows\System32\config\systemprofile\.cache\
+          REM act\...\hostexecutor (because actrunner runs as LocalSystem,
+          REM whose profile is under System32). 32-bit cl.exe gets WoW64
+          REM file-system-redirected from \System32\ to \SysWOW64\, where
+          REM the source files don't exist -- that's the C1083 we hit.
+          REM PreferredToolArchitecture=x64 keeps cl.exe out of WoW64.
+          REM (Output is still x86; only the compiler host changes.)
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" amd64_x86
+          msbuild sapicli.sln -p:Configuration=Release -p:Platform=Win32 -p:PreferredToolArchitecture=x64 -p:VcpkgEnableManifest=false -nologo -m -v:minimal
 
       - name: smoke test sapicli --list
         run: Win32\Release\sapicli.exe --list
