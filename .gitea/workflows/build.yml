@@ -28,30 +28,29 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      # ---- vcpkg install + native build ---------------------------------
-      # We can't rely on msbuild's vcpkg.targets auto-install on this
-      # runner: it picks up the vcpkg bundled with VS BuildTools, which
-      # (a) ignores VCPKG_ROOT, and (b) fails to bootstrap on a fresh
-      # LocalSystem profile (a 7zip 25.01 self-extract bug). Workaround:
-      # call C:\vcpkg\vcpkg.exe install ourselves, then build with
-      # VcpkgEnableManifest=false so msbuild doesn't try to re-install.
-      # The vcxprojs explicitly list the vcpkg include/lib dirs and lib
-      # filenames so they don't need the auto-resolution either.
-      - name: vcpkg install (manifest mode)
+      # ---- vcpkg install + native build (x86) ---------------------------
+      # Building x86 (Win32) rather than x64 because SAPI's voice registry
+      # is bitness-segregated under HKLM\SOFTWARE\WOW6432Node\Microsoft\
+      # Speech\Voices for 32-bit consumers. Some installed voices on prod
+      # had expired trials whose 64-bit engines pop a modal "trial expired"
+      # dialog -- which on a service running as NetworkService (no desktop)
+      # blocks ISpVoice::Speak indefinitely. The 32-bit voice registry
+      # has working unencumbered voices, so build 32-bit.
+      #
+      # vcpkg.targets auto-install: skipped, see prior commit. We call
+      # vcpkg.exe directly with the matching x86-windows-static triplet
+      # and build msbuild with VcpkgEnableManifest=false.
+      - name: vcpkg install (manifest mode, x86)
         run: |
-          REM --x-install-root mirrors the double-triplet layout msbuild's
-          REM vcpkg integration produces locally (vcpkg_installed/x64-windows-
-          REM static/x64-windows-static/include/...), so the include + lib
-          REM paths in the vcxprojs match in both environments.
-          C:\vcpkg\vcpkg.exe install --triplet=x64-windows-static --x-manifest-root=. --x-install-root=.\vcpkg_installed\x64-windows-static
+          C:\vcpkg\vcpkg.exe install --triplet=x86-windows-static --x-manifest-root=. --x-install-root=.\vcpkg_installed\x86-windows-static
 
-      - name: msbuild Release|x64
+      - name: msbuild Release|Win32
         run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          msbuild sapicli.sln -p:Configuration=Release -p:Platform=x64 -p:VcpkgEnableManifest=false -nologo -m -v:minimal
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars32.bat"
+          msbuild sapicli.sln -p:Configuration=Release -p:Platform=Win32 -p:VcpkgEnableManifest=false -nologo -m -v:minimal
 
       - name: smoke test sapicli --list
-        run: x64\Release\sapicli.exe --list
+        run: Win32\Release\sapicli.exe --list
 
       # ---- WASM build (muxaudio.js + muxaudio.wasm) ----------------------
       # cmake/ninja/python are on PATH (installed by runner-setup.ps1 via
@@ -85,8 +84,8 @@ jobs:
         run: |
           $dist = "$pwd\dist"
           New-Item -ItemType Directory -Force $dist | Out-Null
-          Copy-Item x64\Release\sapicli.exe $dist\
-          Copy-Item x64\Release\sapisrv.exe $dist\
+          Copy-Item Win32\Release\sapicli.exe $dist\
+          Copy-Item Win32\Release\sapisrv.exe $dist\
           Copy-Item -Recurse www $dist\www
           $zip = "$pwd\sapisrv-${{ steps.ver.outputs.version }}.zip"
           if (Test-Path $zip) { Remove-Item $zip }
