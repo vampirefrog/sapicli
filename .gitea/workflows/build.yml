@@ -118,9 +118,15 @@ jobs:
           retention-days: 30
 
   # ---- Deploy ----------------------------------------------------------
-  # Auto-runs on tag pushes (v*) for production releases, or manually via
-  # the workflow_dispatch trigger for ad-hoc redeploys. Skipped on
-  # branch/PR builds. Requires three repo secrets:
+  # Manual-only. Triggered by clicking "Run workflow" on the Gitea
+  # Actions UI, or by POSTing to the workflow_dispatch endpoint:
+  #   curl -X POST -H "Authorization: token <gitea-token>" \
+  #     <gitea-url>/api/v1/repos/<owner>/<repo>/actions/workflows/build.yml/dispatches \
+  #     -d '{"ref": "master"}'
+  #
+  # Skipped on every other event (push to master, tag pushes, PRs, etc.)
+  # so production stays put unless somebody intentionally rolls forward.
+  # Requires three repo secrets:
   #
   #   DEPLOY_HOST      target machine IP or DNS name
   #   DEPLOY_USER      local admin on target, format "<host>\<user>"
@@ -141,10 +147,7 @@ jobs:
   deploy:
     needs: build
     runs-on: [self-hosted, windows, x64]
-    # Auto-deploy on tag pushes (production), branch master (iteration),
-    # or manual workflow_dispatch. Tighten to tag-only once production is
-    # stable.
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/master' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
       - name: checkout (just for Deploy-Remote.ps1)
         uses: actions/checkout@v4
