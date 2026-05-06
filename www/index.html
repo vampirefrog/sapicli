@@ -19,20 +19,9 @@
       <label for="text">Text</label>
       <textarea id="text" rows="3">The cat sat on the mat. Then the cat purred at the moon.</textarea>
 
-      <div class="row">
+      <div class="row r4">
         <label>Voice
           <select id="voice"></select>
-        </label>
-        <label>Format
-          <select id="format">
-            <option value="ogg+vorbis">ogg+vorbis</option>
-            <option value="ogg+opus">ogg+opus</option>
-            <option value="mp3">mp3</option>
-          </select>
-        </label>
-        <label class="checkbox">
-          <input id="events" type="checkbox" checked>
-          speech events
         </label>
         <label>Character
           <select id="character">
@@ -40,7 +29,63 @@
             <option value="mic">mic</option>
           </select>
         </label>
+        <label>Text type
+          <select id="texttype">
+            <option value="text">Plain text</option>
+            <option value="ssml">SSML</option>
+            <option value="sapi">SAPI markup</option>
+            <option value="auto" selected>Auto-detect</option>
+          </select>
+        </label>
       </div>
+
+      <div class="row r4">
+        <label>Format
+          <select id="format">
+            <option value="ogg+vorbis">ogg+vorbis</option>
+            <option value="ogg+opus">ogg+opus</option>
+            <option value="mp3">mp3</option>
+          </select>
+        </label>
+        <label>Sample rate
+          <select id="sample_rate">
+            <option value="8000">8 kHz</option>
+            <option value="11025">11.025 kHz</option>
+            <option value="16000">16 kHz</option>
+            <option value="22050" selected>22.05 kHz</option>
+            <option value="24000">24 kHz</option>
+            <option value="32000">32 kHz</option>
+            <option value="44100">44.1 kHz</option>
+            <option value="48000">48 kHz</option>
+          </select>
+        </label>
+        <label>Channels
+          <select id="channels">
+            <option value="1" selected>1 (mono)</option>
+            <option value="2">2 (stereo)</option>
+          </select>
+        </label>
+        <label>Bit depth
+          <select id="bits">
+            <option value="8">8-bit</option>
+            <option value="16" selected>16-bit</option>
+          </select>
+        </label>
+      </div>
+
+      <fieldset id="events">
+        <legend>Speech events</legend>
+        <!-- Mask values are 1<<SPEI_X (Microsoft SAPI SPEVENTENUM). -->
+        <label class="checkbox"><input type="checkbox" name="event" value="2"   checked> Start</label>
+        <label class="checkbox"><input type="checkbox" name="event" value="4"   checked> End</label>
+        <label class="checkbox"><input type="checkbox" name="event" value="8"          > Voice</label>
+        <label class="checkbox"><input type="checkbox" name="event" value="16"         > Bookmark</label>
+        <label class="checkbox"><input type="checkbox" name="event" value="32"  checked> Word</label>
+        <label class="checkbox"><input type="checkbox" name="event" value="64"         > Phoneme</label>
+        <label class="checkbox"><input type="checkbox" name="event" value="128"        > Sentence</label>
+        <label class="checkbox"><input type="checkbox" name="event" value="256" checked> Viseme</label>
+        <label class="checkbox"><input type="checkbox" name="event" value="512"        > Volume</label>
+      </fieldset>
 
       <div class="row">
         <label>Rate <input id="rate" type="range" min="-10" max="10" value="0"></label>
@@ -52,6 +97,12 @@
       <span id="status"></span>
     </form>
   </main>
+
+  <footer>
+    <span>&copy; <span id="year">2026</span> <a href="https://vampi.tech">vampi.tech</a></span>
+    <span><a href="https://git.vampi.tech/vampi/sapicli">git.vampi.tech/vampi/sapicli</a></span>
+  </footer>
+
   <script src="/muxaudio.js"></script>
   <script src="/app.js"></script>
 </body>

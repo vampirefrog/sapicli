@@ -251,35 +251,34 @@ function getAudio() {
 }
 
 async function speak(opts) {
-  const { text, voice, format, events, rate, volume, apiKey, status, puppet, bubble } = opts;
+  const { text, voice, format, eventsMask, textType,
+          sampleRate, channels, bits,
+          rate, volume, apiKey, status, puppet, bubble } = opts;
   status.textContent = 'requesting…';
 
-  // Format selection is two orthogonal axes: the codec (ogg+vorbis,
-  // ogg+opus, mp3) and whether speech events are interleaved. ogg+*
-  // carries events in a parallel ogg stream regardless; mp3 with
-  // events is wrapped in our leb128 multiplex; mp3 without events
-  // is a plain audio/mpeg file the browser can decode directly.
-  let codec, sampleRate;
-  let multiplex = true;        // server: parallel/leb128 transport on
-  let mp3Passthrough = false;  // client: WASM demuxes leb128 -> raw mp3
-  if (format === 'ogg+vorbis') { codec = 'vorbis'; sampleRate = 22050; }
-  else if (format === 'ogg+opus') { codec = 'opus'; sampleRate = 24000; }
-  else if (format === 'mp3') {
-    if (events) { codec = 'mp3'; sampleRate = 22050; mp3Passthrough = true; }
-    else        { codec = null;  sampleRate = 22050; multiplex = false; }
-  } else { status.textContent = `unsupported format: ${format}`; return; }
+  // Format selection has two axes: the codec (ogg+vorbis, ogg+opus,
+  // mp3) and whether speech events are interleaved. Events are
+  // interleaved iff eventsMask != 0 -- the server enables multiplex
+  // automatically in that case (no need to send `multiplex` ourselves).
+  // ogg+* uses a parallel ogg stream for events; mp3 wraps the audio
+  // and event packets in a leb128 frame, which the WASM demuxer pulls
+  // apart on the client. mp3 with no events bypasses WASM entirely
+  // and lets the browser native-decode the raw mp3.
+  const hasEvents = eventsMask > 0;
+  let codec;
+  let multiplex      = hasEvents;
+  let mp3Passthrough = false;
+  if      (format === 'ogg+vorbis')                 { codec = 'vorbis'; }
+  else if (format === 'ogg+opus')                   { codec = 'opus';   }
+  else if (format === 'mp3' &&  hasEvents)          { codec = 'mp3'; mp3Passthrough = true; }
+  else if (format === 'mp3' && !hasEvents)          { codec = null;                          }
+  else { status.textContent = `unsupported format: ${format}`; return; }
 
-  // For ogg+*, multiplexing carries the events on a side channel; turning
-  // events off just tells the server not to emit that channel.
-  if ((format === 'ogg+vorbis' || format === 'ogg+opus') && !events) multiplex = false;
-
-  // The server accepts "ogg" / "ogg+vorbis" / "ogg+opus" / "mp3" verbatim;
-  // pass `format` straight through with no client-side rewriting.
   const params = new URLSearchParams({
     text, format, rate, volume,
-    events: events ? 'all' : '0',
-    multiplex: multiplex ? 'true' : 'false',
-    sample_rate: String(sampleRate), channels: '1', bits: '16',
+    type: textType,
+    events: String(eventsMask),
+    sample_rate: String(sampleRate), channels: String(channels), bits: String(bits),
   });
   if (voice) params.set('voice', voice);
 
@@ -348,10 +347,21 @@ async function speak(opts) {
     }
   } else {
     // PCM int16 little-endian. Convert to float32 in an AudioBuffer.
-    const pcm = new Int16Array(audio.buffer, audio.byteOffset, audio.byteLength >> 1);
-    audioBuf = ctx.createBuffer(1, pcm.length, sampleRate);
-    const ch = audioBuf.getChannelData(0);
-    for (let i = 0; i < pcm.length; ++i) ch[i] = pcm[i] / 32768;
+    // For stereo we get L/R interleaved samples and need to deinterleave.
+    const pcm    = new Int16Array(audio.buffer, audio.byteOffset, audio.byteLength >> 1);
+    const frames = pcm.length / channels;
+    audioBuf     = ctx.createBuffer(channels, frames, sampleRate);
+    if (channels === 1) {
+      const ch0 = audioBuf.getChannelData(0);
+      for (let i = 0; i < frames; ++i) ch0[i] = pcm[i] / 32768;
+    } else {
+      const chs = Array.from({ length: channels }, (_, c) => audioBuf.getChannelData(c));
+      for (let f = 0; f < frames; ++f) {
+        for (let c = 0; c < channels; ++c) {
+          chs[c][f] = pcm[f * channels + c] / 32768;
+        }
+      }
+    }
   }
 
   // muxaudio's mux_decoder_read coalesces queued side-channel packets into one
@@ -449,21 +459,35 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   } catch { /* server might not implement it; harmless */ }
 
+  // Footer year stays current without us touching the HTML.
+  const yearEl = $('year');
+  if (yearEl) yearEl.textContent = String(new Date().getFullYear());
+
   $('form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const btn = $('speak');
     btn.disabled = true;
     try {
+      // OR together the checked event bits to build the SAPI mask.
+      // Each checkbox value is the bit-shifted SPEI_X constant.
+      const eventsMask = Array.from(
+        document.querySelectorAll('#events input[name="event"]:checked')
+      ).reduce((m, cb) => m | parseInt(cb.value, 10), 0);
+
       await speak({
-        text: $('text').value,
-        voice: $('voice').value,
-        format: $('format').value,
-        events: $('events').checked,
-        rate: $('rate').value,
-        volume: $('volume').value,
-        apiKey: $('apikey').value,
-        character: $('character').value,
-        status: $('status'),
+        text:        $('text').value,
+        voice:       $('voice').value,
+        format:      $('format').value,
+        textType:    $('texttype').value,
+        eventsMask,
+        sampleRate:  parseInt($('sample_rate').value, 10),
+        channels:    parseInt($('channels').value,    10),
+        bits:        parseInt($('bits').value,        10),
+        rate:        $('rate').value,
+        volume:      $('volume').value,
+        apiKey:      $('apikey').value,
+        character:   $('character').value,
+        status:      $('status'),
         puppet, bubble,
       });
     } finally {
