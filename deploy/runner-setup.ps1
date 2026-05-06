@@ -76,7 +76,9 @@ $Pkgs = @(
   # JavaScript action (checkout@v4, upload-artifact@v3, etc.) is run
   # via `node` on the host. Without it act_runner fails the very first
   # step with "Cannot find: node in PATH".
-  "OpenJS.NodeJS.LTS"
+  "OpenJS.NodeJS.LTS",
+  # NSIS for the deploy/sapisrv.nsi -> sapisrv-setup-<version>.exe build.
+  "NSIS.NSIS"
   # NOTE: PowerShell 7 is NOT in this list. winget's Microsoft.PowerShell
   # package installs user-scope by default (an app alias under
   # %LOCALAPPDATA%\Microsoft\WindowsApps\) which the LocalSystem service

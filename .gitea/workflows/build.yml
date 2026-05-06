@@ -127,16 +127,50 @@ jobs:
           Copy-Item Win32\Release\sapicli.exe $dist\
           Copy-Item Win32\Release\sapisrv.exe $dist\
           Copy-Item -Recurse www $dist\www
+          Copy-Item deploy\gen-keys.ps1 $dist\
           $zip = "$pwd\sapisrv-${{ steps.ver.outputs.version }}.zip"
           if (Test-Path $zip) { Remove-Item $zip }
           Compress-Archive -Path "$dist\*" -DestinationPath $zip
           Write-Host "Built $zip ($((Get-Item $zip).Length) bytes)"
+
+      # Compile the NSIS installer. NSIS lands at "C:\Program Files (x86)\
+      # NSIS\makensis.exe" via `winget install NSIS.NSIS --scope machine`
+      # (added to runner-setup.ps1). The .nsi defines OutFile based on
+      # the VERSION define, so we just pass it on the command line.
+      - name: build NSIS installer
+        shell: pwsh
+        run: |
+          $version = "${{ steps.ver.outputs.version }}"
+          $exe     = "sapisrv-setup-$version.exe"
+          if (Test-Path $exe) { Remove-Item $exe }
+          # NSIS VIProductVersion is strict 4-part numeric. Pad as needed.
+          $parts   = @($version -split '\.')
+          while ($parts.Length -lt 4) { $parts += '0' }
+          $vi      = ($parts[0..3] -join '.')
+          $makensis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
+          if (-not $makensis) {
+            $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+            if (-not (Test-Path $makensis)) {
+              throw "makensis.exe not on PATH and not at '$makensis'. Install via 'winget install NSIS.NSIS --scope machine'."
+            }
+          }
+          & $makensis /V2 "/DVERSION=$version" "/DVIVERSION=$vi" "/DDISTDIR=$pwd\dist" "/DOUTFILE=$pwd\$exe" deploy\sapisrv.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed (exit $LASTEXITCODE)" }
+          if (-not (Test-Path $exe)) { throw "expected $exe after makensis, but it's not here" }
+          Write-Host "Built $exe ($((Get-Item $exe).Length) bytes)"
 
       - name: upload zip artifact
         uses: actions/upload-artifact@v3
         with:
           name: sapisrv-${{ steps.ver.outputs.version }}-${{ github.sha }}.zip
           path: sapisrv-${{ steps.ver.outputs.version }}.zip
+          retention-days: 30
+
+      - name: upload installer artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: sapisrv-setup-${{ steps.ver.outputs.version }}-${{ github.sha }}.exe
+          path: sapisrv-setup-${{ steps.ver.outputs.version }}.exe
           retention-days: 30
 
   # ---- Deploy ----------------------------------------------------------
@@ -216,7 +250,12 @@ jobs:
         with:
           name: sapisrv-${{ needs.build.outputs.version }}-${{ github.sha }}.zip
 
-      - name: create release + upload zip
+      - name: download installer artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: sapisrv-setup-${{ needs.build.outputs.version }}-${{ github.sha }}.exe
+
+      - name: create release + upload assets
         shell: pwsh
         env:
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -260,25 +299,29 @@ jobs:
             Write-Host "Created release $env:TAG (id=$($rel.id), title='$title')"
           }
 
-          $zip     = ".\sapisrv-$env:VERSION.zip"
-          $zipName = "sapisrv-$env:VERSION.zip"
-          if (-not (Test-Path $zip)) {
-            Get-ChildItem | Out-String | Write-Host
-            throw "expected $zip after download-artifact, but it's not here"
+          # Upload assets. Two artifacts -- the raw zip + the NSIS .exe
+          # installer. Both get attached to the release. Re-run safe:
+          # any existing same-name assets are deleted first so Gitea
+          # doesn't auto-rename the new upload.
+          $assets = @(
+            @{ Path = ".\sapisrv-$env:VERSION.zip";       Name = "sapisrv-$env:VERSION.zip" }
+            @{ Path = ".\sapisrv-setup-$env:VERSION.exe"; Name = "sapisrv-setup-$env:VERSION.exe" }
+          )
+          foreach ($asset in $assets) {
+            if (-not (Test-Path $asset.Path)) {
+              Get-ChildItem | Out-String | Write-Host
+              throw "expected $($asset.Path) after download-artifact, but it's not here"
+            }
+            $existing = $rel.assets | Where-Object { $_.name -eq $asset.Name }
+            if ($existing) {
+              Write-Host "Replacing existing asset $($asset.Name) (id=$($existing.id))"
+              Invoke-RestMethod -Uri "$base/releases/$($rel.id)/assets/$($existing.id)" `
+                                -Method DELETE -Headers $headers | Out-Null
+            }
+            # Gitea wants multipart/form-data with field name "attachment".
+            # PowerShell 7's -Form on Invoke-RestMethod handles the encoding.
+            $assetUrl = "$base/releases/$($rel.id)/assets?name=" + [Uri]::EscapeDataString($asset.Name)
+            Invoke-RestMethod -Uri $assetUrl -Method POST -Headers $headers `
+                              -Form @{ attachment = Get-Item $asset.Path } | Out-Null
+            Write-Host "Uploaded $($asset.Name) to release $env:TAG"
           }
-
-          # If an asset with this name already exists on the release (re-run),
-          # delete it first so the new upload doesn't get auto-renamed.
-          $existing = $rel.assets | Where-Object { $_.name -eq $zipName }
-          if ($existing) {
-            Write-Host "Replacing existing asset $zipName (id=$($existing.id))"
-            Invoke-RestMethod -Uri "$base/releases/$($rel.id)/assets/$($existing.id)" `
-                              -Method DELETE -Headers $headers | Out-Null
-          }
-
-          # Gitea wants multipart/form-data, field name "attachment".
-          # PowerShell 7's -Form on Invoke-RestMethod handles that for us.
-          $assetUrl = "$base/releases/$($rel.id)/assets?name=" + [Uri]::EscapeDataString($zipName)
-          Invoke-RestMethod -Uri $assetUrl -Method POST -Headers $headers `
-                            -Form @{ attachment = Get-Item $zip } | Out-Null
-          Write-Host "Uploaded $zipName to release $env:TAG"
