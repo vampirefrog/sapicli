@@ -118,23 +118,42 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "netsh http add urlacl failed (exit $LASTEXITCODE)" }
 
     # Service: re-create with current binPath + port arg so an upgrade
-    # picks up any --port change. sc.exe rather than `sapisrv.exe install`
-    # because the latter doesn't take a --port today.
-    # The embedded quotes around $exe survive PS's native-arg quoting --
-    # PS escapes them as \" inside the arg it passes to sc.exe, which
-    # then strips its own outer quotes, leaving "..." around the exe path.
+    # picks up any --port change. Use WMI's Win32_Service.Create rather
+    # than sc.exe because sc.exe's binPath= eats embedded quotes badly
+    # under PowerShell's native-arg quoting (the "C:\Program Files\..."
+    # path needs quotes around it AND a space + flags after, which makes
+    # PS double-escape the inner quotes and sc.exe vomits its USAGE).
+    # WMI takes the path as a structural string parameter, no shell
+    # parsing involved.
     $binPath = "`"$exe`" run --port=$Port"
     if ($isFirstDeploy) {
       Write-Host "  Creating service $svcName..."
     } else {
-      Write-Host "  Updating service $svcName binPath..."
-      $stopOut = & sc.exe delete $svcName 2>&1
-      if ($LASTEXITCODE -ne 0) { throw "sc delete failed (exit $LASTEXITCODE): $stopOut" }
+      Write-Host "  Recreating service $svcName (binPath / port may have changed)..."
+      $existing = Get-WmiObject -Class Win32_Service -Filter "Name='$svcName'"
+      if ($existing) { $existing.Delete() | Out-Null }
       Start-Sleep -Milliseconds 500
     }
-    $createOut = & sc.exe create $svcName binPath= $binPath start= auto obj= "NT AUTHORITY\NetworkService" DisplayName= "sapicli SAPI HTTP Server" 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "sc create failed (exit $LASTEXITCODE): $createOut" }
-    & sc.exe description $svcName "Serves SAPI text-to-speech over HTTP, with parallel speech-event multiplexing." | Out-Null
+    $svcWmi = [WMIClass]'Win32_Service'
+    $r = $svcWmi.Create(
+      $svcName,                                    # Name
+      'sapicli SAPI HTTP Server',                  # DisplayName
+      $binPath,                                    # PathName  (full quoted cmdline)
+      16,                                          # ServiceType: 16 = OWN_PROCESS
+      1,                                           # ErrorControl: 1 = NORMAL
+      'Automatic',                                 # StartMode
+      $false,                                      # DesktopInteract
+      'NT AUTHORITY\NetworkService',               # StartName  (account)
+      $null,                                       # StartPassword (built-in account, none)
+      $null,                                       # LoadOrderGroup
+      $null,                                       # LoadOrderGroupDependencies
+      $null                                        # ServiceDependencies
+    )
+    if ($r.ReturnValue -ne 0) {
+      throw "Win32_Service.Create returned $($r.ReturnValue) (see https://learn.microsoft.com/windows/win32/cimwin32prov/create-method-in-class-win32-service)"
+    }
+    # WMI doesn't expose Description; sc.exe handles a single string fine.
+    & sc.exe description $svcName 'Serves SAPI text-to-speech over HTTP, with parallel speech-event multiplexing.' | Out-Null
 
     # keys.json: only generate on a fresh install. Operator-edited files
     # live forever.
