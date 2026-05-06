@@ -67,7 +67,35 @@ To pick a non-default port, pass `--port=N` to the service or to
 `sapisrv.exe console`. The matching `netsh add urlacl` reservation has to
 use the same port.
 
-## Deploy-Remote.ps1 (coming soon)
+## Deploy-Remote.ps1
 
-PSRemoting from CI to push the zip to the prod VM, stop the service, swap
-files, restart. Tag-push only.
+PSRemoting wrapper around the manual file-copy steps above. Run from any
+machine with network reach + administrator credentials on the target:
+
+```powershell
+.\deploy\Deploy-Remote.ps1 `
+  -ComputerName prod-vm `
+  -ZipPath .\sapisrv-0.1.2.zip `
+  -Port 8080
+```
+
+What it does on the remote:
+
+1. Stops `sapisrv` service if running
+2. Unzips into `C:\Program Files\sapisrv\` (overrides `-InstallDir`)
+3. Re-creates the URL ACL (`netsh http add urlacl`) and the SCM service
+   entry (`sc create`) with the current binPath + `--port=N` -- so an
+   upgrade with a different port re-binds correctly
+4. On a *first* deploy only, drops a `keys.json` with a randomly-generated
+   public-trial key (rate limits: 10 req/min and 100 req/hour per IP).
+   Operator-edited `keys.json` files are left alone forever.
+5. Starts the service, waits for `RUNNING`, polls `/health` to confirm
+   the HTTP listener is actually answering
+
+Pass `-Credential (Get-Credential)` if the current user isn't already
+admin on the target. PSRemoting must be enabled on the target
+(`Enable-PSRemoting -Force` from an elevated prompt there, once).
+
+The script is idempotent: re-running with a newer zip just swaps the
+binaries and bounces the service. To deploy from CI on tag pushes,
+add a job that does `actions/download-artifact` + invokes this script.
