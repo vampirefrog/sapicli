@@ -133,10 +133,17 @@ jobs:
           Compress-Archive -Path "$dist\*" -DestinationPath $zip
           Write-Host "Built $zip ($((Get-Item $zip).Length) bytes)"
 
-      # Compile the NSIS installer. NSIS lands at "C:\Program Files (x86)\
-      # NSIS\makensis.exe" via `winget install NSIS.NSIS --scope machine`
-      # (added to runner-setup.ps1). The .nsi defines OutFile based on
-      # the VERSION define, so we just pass it on the command line.
+      # Compile the NSIS installer. NSIS at "C:\Program Files (x86)\NSIS\
+      # makensis.exe" is 32-bit; the runner workspace is under
+      # C:\Windows\System32\config\systemprofile\.cache\act\... (because
+      # actrunner runs as LocalSystem). 32-bit processes hit WoW64 file-
+      # system redirection on \System32\ -> \SysWOW64\, where the workspace
+      # doesn't exist; makensis would say "Can't open script". Same kind
+      # of bug as the cl.exe one we worked around with the amd64_x86 cross
+      # compiler -- but NSIS has no 64-bit binary to switch to.
+      #
+      # Workaround: stage the .nsi + dist/ into a fresh non-System32 dir,
+      # build there, copy the .exe back to the workspace, clean up.
       - name: build NSIS installer
         shell: pwsh
         run: |
@@ -147,6 +154,7 @@ jobs:
           $parts   = @($version -split '\.')
           while ($parts.Length -lt 4) { $parts += '0' }
           $vi      = ($parts[0..3] -join '.')
+
           $makensis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
           if (-not $makensis) {
             $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
@@ -154,10 +162,21 @@ jobs:
               throw "makensis.exe not on PATH and not at '$makensis'. Install via 'winget install NSIS.NSIS --scope machine'."
             }
           }
-          & $makensis /V2 "/DVERSION=$version" "/DVIVERSION=$vi" "/DDISTDIR=$pwd\dist" "/DOUTFILE=$pwd\$exe" deploy\sapisrv.nsi
+
+          $stage = "C:\actrunner-nsis\$($env:GITHUB_SHA)"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item -Recurse "$pwd\dist"            "$stage\dist"
+          Copy-Item          "$pwd\deploy\sapisrv.nsi" "$stage\sapisrv.nsi"
+
+          $stagedExe = "$stage\$exe"
+          & $makensis /V2 "/DVERSION=$version" "/DVIVERSION=$vi" "/DDISTDIR=$stage\dist" "/DOUTFILE=$stagedExe" "$stage\sapisrv.nsi"
           if ($LASTEXITCODE -ne 0) { throw "makensis failed (exit $LASTEXITCODE)" }
-          if (-not (Test-Path $exe)) { throw "expected $exe after makensis, but it's not here" }
-          Write-Host "Built $exe ($((Get-Item $exe).Length) bytes)"
+          if (-not (Test-Path $stagedExe)) { throw "expected $stagedExe after makensis, but it's not here" }
+
+          Move-Item $stagedExe "$pwd\$exe"
+          Remove-Item $stage -Recurse -Force
+          Write-Host "Built $exe ($((Get-Item "$pwd\$exe").Length) bytes)"
 
       - name: upload zip artifact
         uses: actions/upload-artifact@v3
