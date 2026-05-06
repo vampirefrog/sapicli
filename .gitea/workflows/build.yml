@@ -76,16 +76,15 @@ jobs:
           Copy-Item "$build\muxaudio.js","$build\muxaudio.wasm" www/ -Force
 
       # ---- assemble dist/ + zip it ---------------------------------------
-      # The deploy story is "copy this zip to the target machine, unzip,
-      # run sapisrv.exe install". No MSI; nothing fancy. The version comes
-      # from the tag (v0.1.2 -> 0.1.2) on tag pushes, otherwise 0.0.0 for
-      # branch / PR builds.
+      # Version comes from the tag (v0.8 -> 0.8, v1.2.3 -> 1.2.3) on tag
+      # pushes; 0.0.0 for branch / PR builds. The regex accepts 1-4 numeric
+      # parts so `v0.8` works as well as `v0.8.1`.
       - name: derive version
         id: ver
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          $v = if ($tag -match '^v(\d+\.\d+\.\d+)') { $matches[1] } else { '0.0.0' }
+          $v = if ($tag -match '^v(\d+(?:\.\d+){0,3})') { $matches[1] } else { '0.0.0' }
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: stage + zip dist/
@@ -166,3 +165,74 @@ jobs:
             throw "expected $zip after download-artifact, but it's not here"
           }
           .\deploy\Deploy-Remote.ps1 -ComputerName $env:DEPLOY_HOST -Credential $cred -ZipPath $zip
+
+  # ---- Release --------------------------------------------------------
+  # Tag-pushes only. Creates (or finds) a Gitea release for the tag, then
+  # uploads the build job's zip as a release asset so the artifact is
+  # downloadable from the public release page (not just from the run's
+  # private Actions artifacts).
+  release:
+    needs: build
+    runs-on: [self-hosted, windows, x64]
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - name: download zip artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: sapisrv-${{ needs.build.outputs.version }}-${{ github.sha }}.zip
+
+      - name: create release + upload zip
+        shell: pwsh
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO:        ${{ github.repository }}
+          TAG:         ${{ github.ref_name }}
+          VERSION:     ${{ needs.build.outputs.version }}
+          SERVER:      ${{ github.server_url }}
+          SHA:         ${{ github.sha }}
+        run: |
+          if (-not $env:GITEA_TOKEN) { throw "GITHUB_TOKEN unavailable" }
+
+          $base    = "$env:SERVER/api/v1/repos/$env:REPO"
+          $headers = @{ Authorization = "token $env:GITEA_TOKEN" }
+
+          # Re-run safety: if a release for this tag already exists, reuse it.
+          # Otherwise create a fresh one with the tag name as the title.
+          try {
+            $rel = Invoke-RestMethod -Uri "$base/releases/tags/$env:TAG" -Headers $headers -ErrorAction Stop
+            Write-Host "Reusing existing release for $env:TAG (id=$($rel.id))"
+          } catch {
+            $body = @{
+              tag_name   = $env:TAG
+              name       = $env:TAG
+              body       = "Automated build of sapisrv $env:VERSION from commit $env:SHA."
+              draft      = $false
+              prerelease = $false
+            } | ConvertTo-Json
+            $rel = Invoke-RestMethod -Uri "$base/releases" -Method POST -Headers $headers `
+                                     -ContentType 'application/json' -Body $body
+            Write-Host "Created release $env:TAG (id=$($rel.id))"
+          }
+
+          $zip     = ".\sapisrv-$env:VERSION.zip"
+          $zipName = "sapisrv-$env:VERSION.zip"
+          if (-not (Test-Path $zip)) {
+            Get-ChildItem | Out-String | Write-Host
+            throw "expected $zip after download-artifact, but it's not here"
+          }
+
+          # If an asset with this name already exists on the release (re-run),
+          # delete it first so the new upload doesn't get auto-renamed.
+          $existing = $rel.assets | Where-Object { $_.name -eq $zipName }
+          if ($existing) {
+            Write-Host "Replacing existing asset $zipName (id=$($existing.id))"
+            Invoke-RestMethod -Uri "$base/releases/$($rel.id)/assets/$($existing.id)" `
+                              -Method DELETE -Headers $headers | Out-Null
+          }
+
+          # Gitea wants multipart/form-data, field name "attachment".
+          # PowerShell 7's -Form on Invoke-RestMethod handles that for us.
+          $assetUrl = "$base/releases/$($rel.id)/assets?name=" + [Uri]::EscapeDataString($zipName)
+          Invoke-RestMethod -Uri $assetUrl -Method POST -Headers $headers `
+                            -Form @{ attachment = Get-Item $zip } | Out-Null
+          Write-Host "Uploaded $zipName to release $env:TAG"
