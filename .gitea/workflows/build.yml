@@ -115,9 +115,17 @@ jobs:
             $body  = (git tag -l --format='%(contents:body)'    $tag | Out-String).Trim()
             if (-not $title) { $title = $tag }   # lightweight tag fallback
           }
-          # GITHUB_OUTPUT escapes for multi-line values: use a heredoc.
-          "title<<__EOF__`n$title`n__EOF__" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "body<<__EOF__`n$body`n__EOF__"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          # GITHUB_OUTPUT format for multi-line values is a heredoc. Use a
+          # GUID-style sentinel so an EOF marker collision with literal tag
+          # text is essentially impossible. Write line-by-line via
+          # Add-Content so PowerShell's single-string newline conversion
+          # can't mangle multi-line bodies.
+          $eof = "EOF_$([guid]::NewGuid().ToString('N'))"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "title=$title"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "body<<$eof"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value $body
+          Add-Content -Path $env:GITHUB_OUTPUT -Value $eof
 
       - name: stage + zip dist/
         shell: pwsh
