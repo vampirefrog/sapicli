@@ -6,10 +6,17 @@ on:
     tags:     ["v*"]
   pull_request:
     branches: [master]
+  # Manual trigger from Gitea UI: Actions tab -> "build" -> "Run workflow".
+  # Useful for redeploying without pushing a new commit.
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: [self-hosted, windows, x64]
+    # Expose the resolved version to downstream jobs (deploy needs it
+    # to construct the artifact name + zip filename).
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     defaults:
       run:
         shell: cmd
@@ -93,8 +100,58 @@ jobs:
           path: sapisrv-${{ steps.ver.outputs.version }}.zip
           retention-days: 30
 
-  # Deploy job will land in a follow-up commit. Plan:
-  #   - download the zip artifact
-  #   - PSRemoting to the prod VM
-  #   - stop sapisrv service, copy zip, unzip, start service
-  #   - on tag pushes only.
+  # ---- Deploy ----------------------------------------------------------
+  # Auto-runs on tag pushes (v*) for production releases, or manually via
+  # the workflow_dispatch trigger for ad-hoc redeploys. Skipped on
+  # branch/PR builds. Requires three repo secrets:
+  #
+  #   DEPLOY_HOST      target machine IP or DNS name
+  #   DEPLOY_USER      local admin on target, format "<host>\<user>"
+  #                    e.g. "192.168.1.92\Administrator"
+  #   DEPLOY_PASSWORD  password for that account
+  #
+  # One-time setup on the runner machine (we deploy FROM the runner, so
+  # WinRM client must trust the target):
+  #   Set-Item WSMan:\localhost\Client\TrustedHosts -Value '*' -Force
+  # (or pin to specific IPs / a subnet pattern).
+  #
+  # And on the target machine (we deploy TO the prod VM, so WinRM server
+  # must accept us):
+  #   Enable-PSRemoting -SkipNetworkProfileCheck -Force
+  #   New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' \
+  #     -Name LocalAccountTokenFilterPolicy -PropertyType DWord -Value 1 -Force
+  #   Restart-Service WinRM
+  deploy:
+    needs: build
+    runs-on: [self-hosted, windows, x64]
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - name: checkout (just for Deploy-Remote.ps1)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: download zip artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: sapisrv-${{ needs.build.outputs.version }}-${{ github.sha }}.zip
+
+      - name: deploy via PSRemoting
+        shell: pwsh
+        env:
+          DEPLOY_HOST:     ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER:     ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
+        run: |
+          if (-not $env:DEPLOY_HOST)     { throw "DEPLOY_HOST secret not set" }
+          if (-not $env:DEPLOY_USER)     { throw "DEPLOY_USER secret not set" }
+          if (-not $env:DEPLOY_PASSWORD) { throw "DEPLOY_PASSWORD secret not set" }
+
+          $sec  = ConvertTo-SecureString $env:DEPLOY_PASSWORD -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential($env:DEPLOY_USER, $sec)
+          $zip  = ".\sapisrv-${{ needs.build.outputs.version }}.zip"
+          if (-not (Test-Path $zip)) {
+            Get-ChildItem | Out-String | Write-Host
+            throw "expected $zip after download-artifact, but it's not here"
+          }
+          .\deploy\Deploy-Remote.ps1 -ComputerName $env:DEPLOY_HOST -Credential $cred -ZipPath $zip
