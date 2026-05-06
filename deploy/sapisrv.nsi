@@ -9,16 +9,23 @@
 ;   - per-machine install (admin elevation requested)
 ;   - default install dir C:\Program Files\sapisrv\, user-overridable
 ;   - registers "sapisrv" as a Windows service running as NetworkService
+;     (binPath derived from INSTDIR at install time, so the install can
+;     live anywhere)
 ;   - reserves the http://+:8080/ URL ACL for that account
 ;   - generates %ProgramData%\sapicli\keys.json with a random public-trial
 ;     key on first install (gen-keys.ps1 is idempotent on re-runs)
+;   - optional: append INSTDIR to system PATH (default on, opt-out via
+;     the Components page) so `sapicli` is callable from any cmd
 ;   - "Open the sapisrv web UI in my browser" checkbox on the Finish page
 ;   - uninstaller stops + removes the service, removes the URL ACL,
-;     deletes program files; keeps %ProgramData%\sapicli\ (logs, keys.json)
+;     deletes program files, and undoes the PATH addition;
+;     %ProgramData%\sapicli\ (logs, keys.json) is preserved
 ; -----------------------------------------------------------------------------
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "WordFunc.nsh"
+!include "WinMessages.nsh"
 
 !ifndef VERSION
   !define VERSION "0.0.0"
@@ -34,6 +41,8 @@
 !ifndef OUTFILE
   !define OUTFILE "sapisrv-setup-${VERSION}.exe"
 !endif
+
+!define HKLM_ENV "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
 
 Name "sapicli SAPI HTTP Server ${VERSION}"
 OutFile "${OUTFILE}"
@@ -63,6 +72,7 @@ VIAddVersionKey "FileDescription" "sapicli SAPI HTTP Server installer"
 !define MUI_FINISHPAGE_RUN_FUNCTION "OpenWebUI"
 
 !insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
@@ -76,8 +86,13 @@ Function OpenWebUI
   ExecShell "open" "http://localhost:8080/"
 FunctionEnd
 
-; --- Install ---
-Section "Install" SEC_INSTALL
+; --- Sections ---
+
+; The core install. Mandatory (read-only in the Components UI), since
+; everything else (service, ACL, keys.json) depends on the files being
+; on disk.
+Section "sapicli + sapisrv (required)" SEC_INSTALL
+  SectionIn RO
   SetOutPath "$INSTDIR"
   File "${DISTDIR}\sapicli.exe"
   File "${DISTDIR}\sapisrv.exe"
@@ -101,11 +116,6 @@ Section "Install" SEC_INSTALL
   nsExec::ExecToLog '"$SYSDIR\netsh.exe" http add urlacl url=http://+:8080/ user="NT AUTHORITY\NetworkService"'
 
   DetailPrint "Generating keys.json (no-op if it already exists)..."
-  ; %ProgramData% expands to C:\ProgramData on modern Windows. NSIS
-  ; doesn't ship a $PROGRAMDATA / $COMMONAPPDATA built-in, so read the
-  ; env var directly. gen-keys.ps1 itself uses $env:ProgramData and
-  ; creates the dir if it doesn't exist; we mkdir here just to keep the
-  ; intent visible.
   ReadEnvStr $R0 "ProgramData"
   CreateDirectory "$R0\sapicli"
   nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\gen-keys.ps1"'
@@ -125,6 +135,38 @@ Section "Install" SEC_INSTALL
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\sapisrv" "NoRepair" 1
 SectionEnd
 
+; Optional: add INSTDIR to the system-wide PATH. Default on. Idempotent
+; (won't add a duplicate if it's already there).
+Section "Add to system PATH" SEC_PATH
+  DetailPrint "Adding $INSTDIR to system PATH..."
+  ReadRegStr $0 HKLM "${HKLM_ENV}" "Path"
+  ; Wrap in delimiters so a substring match doesn't false-positive
+  ; on dirs that happen to share a suffix with $INSTDIR.
+  ${WordFind} ";$0;" ";$INSTDIR;" "E+1{" $1
+  ${If} $1 != ""
+    DetailPrint "  already present; skipping."
+  ${Else}
+    ${If} $0 == ""
+      StrCpy $0 "$INSTDIR"
+    ${Else}
+      StrCpy $0 "$0;$INSTDIR"
+    ${EndIf}
+    WriteRegExpandStr HKLM "${HKLM_ENV}" "Path" "$0"
+    ; Tell already-running processes (Explorer, etc.) so new shells they
+    ; spawn pick up the change without a reboot. Existing cmd/PS shells
+    ; still need to be reopened.
+    SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
+  ${EndIf}
+SectionEnd
+
+LangString DESC_SEC_INSTALL ${LANG_ENGLISH} "Installs sapicli.exe + the sapisrv Windows service. Required."
+LangString DESC_SEC_PATH    ${LANG_ENGLISH} "Append the install folder to the system PATH so `sapicli` is callable from any command prompt."
+
+!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_INSTALL} $(DESC_SEC_INSTALL)
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_PATH}    $(DESC_SEC_PATH)
+!insertmacro MUI_FUNCTION_DESCRIPTION_END
+
 ; --- Uninstall ---
 Section "Uninstall"
   DetailPrint "Stopping + removing sapisrv service..."
@@ -133,6 +175,22 @@ Section "Uninstall"
 
   DetailPrint "Releasing URL ACL..."
   nsExec::ExecToLog '"$SYSDIR\netsh.exe" http delete urlacl url=http://+:8080/'
+
+  ; Remove INSTDIR from PATH (whether or not the user opted in at
+  ; install time -- always safe; it's a no-op if not present).
+  DetailPrint "Removing $INSTDIR from system PATH (if present)..."
+  ReadRegStr $0 HKLM "${HKLM_ENV}" "Path"
+  ${WordReplace} "$0" ";$INSTDIR" "" "+" $1
+  ${If} $1 == "$0"
+    ${WordReplace} "$0" "$INSTDIR;" "" "+" $1
+  ${EndIf}
+  ${If} $1 == "$0"
+    ${WordReplace} "$0" "$INSTDIR" "" "+" $1
+  ${EndIf}
+  ${If} $1 != "$0"
+    WriteRegExpandStr HKLM "${HKLM_ENV}" "Path" "$1"
+    SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
+  ${EndIf}
 
   RMDir /r "$INSTDIR\www"
   Delete   "$INSTDIR\sapicli.exe"
