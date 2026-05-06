@@ -23,10 +23,13 @@ concurrency:
 jobs:
   build:
     runs-on: [self-hosted, windows, x64]
-    # Expose the resolved version to downstream jobs (deploy needs it
-    # to construct the artifact name + zip filename).
+    # Expose the resolved version + tag-annotation-derived title/body to
+    # downstream jobs. deploy uses the version for the zip filename;
+    # release uses title + body for the Gitea release metadata.
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      title:   ${{ steps.ver.outputs.title }}
+      body:    ${{ steps.ver.outputs.body }}
     defaults:
       run:
         shell: cmd
@@ -85,10 +88,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "wasm build failed" }
           Copy-Item "$build\muxaudio.js","$build\muxaudio.wasm" www/ -Force
 
-      # ---- assemble dist/ + zip it ---------------------------------------
-      # Version comes from the tag (v0.8 -> 0.8, v1.2.3 -> 1.2.3) on tag
-      # pushes; 0.0.0 for branch / PR builds. The regex accepts 1-4 numeric
-      # parts so `v0.8` works as well as `v0.8.1`.
+      # ---- derive version + release metadata ---------------------------
+      # Version: tag (v0.8 -> 0.8, v1.2.3 -> 1.2.3) or 0.0.0 for non-tag
+      # builds. The regex accepts 1-4 numeric parts so v0.8 works as
+      # well as v0.8.1.
+      #
+      # Title / body: read from the tag's annotation message. The first
+      # line of `git tag -m '...'` becomes the release title; everything
+      # after is the body. Falls back to the tag name if the tag is
+      # lightweight (no annotation) or this isn't a tag build.
       - name: derive version
         id: ver
         shell: pwsh
@@ -96,6 +104,20 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $v = if ($tag -match '^v(\d+(?:\.\d+){0,3})') { $matches[1] } else { '0.0.0' }
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          # Tag-message extraction. Only meaningful on tag builds; for
+          # branch/PR/dispatch the title/body outputs are empty and the
+          # release job (which is the only consumer) doesn't run anyway.
+          $title = ''
+          $body  = ''
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $title = (git tag -l --format='%(contents:subject)' $tag | Out-String).Trim()
+            $body  = (git tag -l --format='%(contents:body)'    $tag | Out-String).Trim()
+            if (-not $title) { $title = $tag }   # lightweight tag fallback
+          }
+          # GITHUB_OUTPUT escapes for multi-line values: use a heredoc.
+          "title<<__EOF__`n$title`n__EOF__" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "body<<__EOF__`n$body`n__EOF__"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: stage + zip dist/
         shell: pwsh
@@ -201,6 +223,8 @@ jobs:
           REPO:        ${{ github.repository }}
           TAG:         ${{ github.ref_name }}
           VERSION:     ${{ needs.build.outputs.version }}
+          TITLE:       ${{ needs.build.outputs.title }}
+          BODY:        ${{ needs.build.outputs.body }}
           SERVER:      ${{ github.server_url }}
           SHA:         ${{ github.sha }}
         run: |
@@ -209,22 +233,31 @@ jobs:
           $base    = "$env:SERVER/api/v1/repos/$env:REPO"
           $headers = @{ Authorization = "token $env:GITEA_TOKEN" }
 
-          # Re-run safety: if a release for this tag already exists, reuse it.
-          # Otherwise create a fresh one with the tag name as the title.
+          # Title comes from the tag annotation's first line; body from
+          # the rest. Defaults so we never POST empty strings to Gitea.
+          $title = if ($env:TITLE) { $env:TITLE } else { $env:TAG }
+          $body  = if ($env:BODY)  { $env:BODY  } else { "Automated build of sapisrv $env:VERSION from commit $env:SHA." }
+
+          $payload = @{
+            tag_name   = $env:TAG
+            name       = $title
+            body       = $body
+            draft      = $false
+            prerelease = $false
+          } | ConvertTo-Json
+
+          # Re-run safety: if a release for this tag already exists,
+          # PATCH its name + body so a re-tag with a new annotation
+          # actually updates the visible title. Otherwise create.
           try {
             $rel = Invoke-RestMethod -Uri "$base/releases/tags/$env:TAG" -Headers $headers -ErrorAction Stop
-            Write-Host "Reusing existing release for $env:TAG (id=$($rel.id))"
+            Invoke-RestMethod -Uri "$base/releases/$($rel.id)" -Method PATCH -Headers $headers `
+                              -ContentType 'application/json' -Body $payload | Out-Null
+            Write-Host "Updated existing release $env:TAG (id=$($rel.id), title='$title')"
           } catch {
-            $body = @{
-              tag_name   = $env:TAG
-              name       = $env:TAG
-              body       = "Automated build of sapisrv $env:VERSION from commit $env:SHA."
-              draft      = $false
-              prerelease = $false
-            } | ConvertTo-Json
             $rel = Invoke-RestMethod -Uri "$base/releases" -Method POST -Headers $headers `
-                                     -ContentType 'application/json' -Body $body
-            Write-Host "Created release $env:TAG (id=$($rel.id))"
+                                     -ContentType 'application/json' -Body $payload
+            Write-Host "Created release $env:TAG (id=$($rel.id), title='$title')"
           }
 
           $zip     = ".\sapisrv-$env:VERSION.zip"
