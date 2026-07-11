@@ -6,7 +6,6 @@
     "libogg",
     "libvorbis",
     "opus",
-    "mp3lame",
-    "nlohmann-json"
+    "mp3lame"
   ]
 }

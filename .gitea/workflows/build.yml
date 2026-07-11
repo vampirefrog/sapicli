@@ -7,15 +7,12 @@ on:
   pull_request:
     branches: [master]
   # Manual trigger from Gitea UI: Actions tab -> "build" -> "Run workflow".
-  # Useful for redeploying without pushing a new commit.
   workflow_dispatch:
 
-# When master gets pushed and then a tag created at the same commit,
-# Gitea fires both events and the workflow runs twice on the same SHA --
-# the build is identical, so cancel the in-flight one when a newer event
-# for the same commit arrives. The tag-push run wins (because it's the
-# later event), which gives us deploy + release in one go instead of
-# two duplicate builds.
+# When master gets pushed and then a tag created at the same commit, Gitea
+# fires both events and the workflow runs twice on the same SHA -- the build
+# is identical, so cancel the in-flight one when a newer event for the same
+# commit arrives.
 concurrency:
   group: build-${{ github.sha }}
   cancel-in-progress: true
@@ -23,9 +20,6 @@ concurrency:
 jobs:
   build:
     runs-on: [self-hosted, windows, x64]
-    # Expose the resolved version + tag-annotation-derived title/body to
-    # downstream jobs. deploy uses the version for the zip filename;
-    # release uses title + body for the Gitea release metadata.
     outputs:
       version: ${{ steps.ver.outputs.version }}
       title:   ${{ steps.ver.outputs.title }}
@@ -47,12 +41,8 @@ jobs:
       # Speech\Voices for 32-bit consumers. Some installed voices on prod
       # had expired trials whose 64-bit engines pop a modal "trial expired"
       # dialog -- which on a service running as NetworkService (no desktop)
-      # blocks ISpVoice::Speak indefinitely. The 32-bit voice registry
-      # has working unencumbered voices, so build 32-bit.
-      #
-      # vcpkg.targets auto-install: skipped, see prior commit. We call
-      # vcpkg.exe directly with the matching x86-windows-static triplet
-      # and build msbuild with VcpkgEnableManifest=false.
+      # blocks ISpVoice::Speak indefinitely. The 32-bit voice registry has
+      # working unencumbered voices, so build 32-bit.
       - name: vcpkg install (manifest mode, x86)
         run: |
           C:\vcpkg\vcpkg.exe install --triplet=x86-windows-static --x-manifest-root=. --x-install-root=.\vcpkg_installed\x86-windows-static
@@ -74,20 +64,6 @@ jobs:
       - name: smoke test sapicli --list
         run: Win32\Release\sapicli.exe --list
 
-      # ---- WASM build (muxaudio.js + muxaudio.wasm) ----------------------
-      # cmake/ninja/python are on PATH (installed by runner-setup.ps1 via
-      # winget). emsdk is at C:\emsdk. Build into muxaudio/build-wasm/, then
-      # copy artifacts into www/ so the staging step picks them up.
-      - name: build muxaudio WASM
-        shell: pwsh
-        run: |
-          $build = "$pwd\muxaudio\build-wasm"
-          & cmd /c "C:\emsdk\emsdk_env.bat >nul 2>nul && emcmake.bat cmake `"$pwd\muxaudio`" -B `"$build`" -G Ninja -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCODEC_VORBIS=ON -DCODEC_OPUS=ON -DCODEC_MP3=ON -DCODEC_MP3_DECODE=ON -DCODEC_MP3_ENCODE=OFF -DCMAKE_BUILD_TYPE=Release"
-          if ($LASTEXITCODE -ne 0) { throw "emcmake failed" }
-          & cmd /c "C:\emsdk\emsdk_env.bat >nul 2>nul && cmake --build `"$build`" --target muxaudio"
-          if ($LASTEXITCODE -ne 0) { throw "wasm build failed" }
-          Copy-Item "$build\muxaudio.js","$build\muxaudio.wasm" www/ -Force
-
       # ---- derive version + release metadata ---------------------------
       # Version: tag (v0.8 -> 0.8, v1.2.3 -> 1.2.3) or 0.0.0 for non-tag
       # builds. The regex accepts 1-4 numeric parts so v0.8 works as
@@ -105,162 +81,34 @@ jobs:
           $v = if ($tag -match '^v(\d+(?:\.\d+){0,3})') { $matches[1] } else { '0.0.0' }
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-          # Tag-message extraction. Only meaningful on tag builds; for
-          # branch/PR/dispatch the title/body outputs are empty and the
-          # release job (which is the only consumer) doesn't run anyway.
           $title = ''
           $body  = ''
           if ('${{ github.ref_type }}' -eq 'tag') {
             $title = (git tag -l --format='%(contents:subject)' $tag | Out-String).Trim()
             $body  = (git tag -l --format='%(contents:body)'    $tag | Out-String).Trim()
-            if (-not $title) { $title = $tag }   # lightweight tag fallback
+            if (-not $title) { $title = $tag }
           }
 
-          # GITHUB_OUTPUT format for multi-line values is a heredoc. Use a
-          # GUID-style sentinel so an EOF marker collision with literal tag
-          # text is essentially impossible. Write line-by-line via
-          # Add-Content so PowerShell's single-string newline conversion
-          # can't mangle multi-line bodies.
           $eof = "EOF_$([guid]::NewGuid().ToString('N'))"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "title=$title"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "body<<$eof"
           Add-Content -Path $env:GITHUB_OUTPUT -Value $body
           Add-Content -Path $env:GITHUB_OUTPUT -Value $eof
 
-      - name: stage + zip dist/
+      - name: zip sapicli.exe
         shell: pwsh
         run: |
-          $dist = "$pwd\dist"
-          New-Item -ItemType Directory -Force $dist | Out-Null
-          Copy-Item Win32\Release\sapicli.exe $dist\
-          Copy-Item Win32\Release\sapisrv.exe $dist\
-          Copy-Item -Recurse www $dist\www
-          Copy-Item deploy\gen-keys.ps1 $dist\
-          $zip = "$pwd\sapisrv-${{ steps.ver.outputs.version }}.zip"
+          $zip = "$pwd\sapicli-${{ steps.ver.outputs.version }}.zip"
           if (Test-Path $zip) { Remove-Item $zip }
-          Compress-Archive -Path "$dist\*" -DestinationPath $zip
+          Compress-Archive -Path Win32\Release\sapicli.exe -DestinationPath $zip
           Write-Host "Built $zip ($((Get-Item $zip).Length) bytes)"
-
-      # Compile the NSIS installer. NSIS at "C:\Program Files (x86)\NSIS\
-      # makensis.exe" is 32-bit; the runner workspace is under
-      # C:\Windows\System32\config\systemprofile\.cache\act\... (because
-      # actrunner runs as LocalSystem). 32-bit processes hit WoW64 file-
-      # system redirection on \System32\ -> \SysWOW64\, where the workspace
-      # doesn't exist; makensis would say "Can't open script". Same kind
-      # of bug as the cl.exe one we worked around with the amd64_x86 cross
-      # compiler -- but NSIS has no 64-bit binary to switch to.
-      #
-      # Workaround: stage the .nsi + dist/ into a fresh non-System32 dir,
-      # build there, copy the .exe back to the workspace, clean up.
-      - name: build NSIS installer
-        shell: pwsh
-        run: |
-          $version = "${{ steps.ver.outputs.version }}"
-          $exe     = "sapisrv-setup-$version.exe"
-          if (Test-Path $exe) { Remove-Item $exe }
-          # NSIS VIProductVersion is strict 4-part numeric. Pad as needed.
-          $parts   = @($version -split '\.')
-          while ($parts.Length -lt 4) { $parts += '0' }
-          $vi      = ($parts[0..3] -join '.')
-
-          $makensis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
-          if (-not $makensis) {
-            $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
-            if (-not (Test-Path $makensis)) {
-              throw "makensis.exe not on PATH and not at '$makensis'. Install via 'winget install NSIS.NSIS --scope machine'."
-            }
-          }
-
-          $stage = "C:\actrunner-nsis\$($env:GITHUB_SHA)"
-          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-          New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          Copy-Item -Recurse "$pwd\dist"            "$stage\dist"
-          Copy-Item          "$pwd\deploy\sapisrv.nsi" "$stage\sapisrv.nsi"
-
-          $stagedExe = "$stage\$exe"
-          & $makensis /V2 "/DVERSION=$version" "/DVIVERSION=$vi" "/DDISTDIR=$stage\dist" "/DOUTFILE=$stagedExe" "$stage\sapisrv.nsi"
-          if ($LASTEXITCODE -ne 0) { throw "makensis failed (exit $LASTEXITCODE)" }
-          if (-not (Test-Path $stagedExe)) { throw "expected $stagedExe after makensis, but it's not here" }
-
-          Move-Item $stagedExe "$pwd\$exe"
-          Remove-Item $stage -Recurse -Force
-          Write-Host "Built $exe ($((Get-Item "$pwd\$exe").Length) bytes)"
 
       - name: upload zip artifact
         uses: actions/upload-artifact@v3
         with:
-          name: sapisrv-${{ steps.ver.outputs.version }}-${{ github.sha }}.zip
-          path: sapisrv-${{ steps.ver.outputs.version }}.zip
+          name: sapicli-${{ steps.ver.outputs.version }}-${{ github.sha }}.zip
+          path: sapicli-${{ steps.ver.outputs.version }}.zip
           retention-days: 30
-
-      - name: upload installer artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: sapisrv-setup-${{ steps.ver.outputs.version }}-${{ github.sha }}.exe
-          path: sapisrv-setup-${{ steps.ver.outputs.version }}.exe
-          retention-days: 30
-
-  # ---- Deploy ----------------------------------------------------------
-  # Manual-only. Triggered by clicking "Run workflow" on the Gitea
-  # Actions UI, or by POSTing to the workflow_dispatch endpoint:
-  #   curl -X POST -H "Authorization: token <gitea-token>" \
-  #     <gitea-url>/api/v1/repos/<owner>/<repo>/actions/workflows/build.yml/dispatches \
-  #     -d '{"ref": "master"}'
-  #
-  # Skipped on every other event (push to master, tag pushes, PRs, etc.)
-  # so production stays put unless somebody intentionally rolls forward.
-  # Requires three repo secrets:
-  #
-  #   DEPLOY_HOST      target machine IP or DNS name
-  #   DEPLOY_USER      local admin on target, format "<host>\<user>"
-  #                    e.g. "192.168.1.92\Administrator"
-  #   DEPLOY_PASSWORD  password for that account
-  #
-  # One-time setup on the runner machine (we deploy FROM the runner, so
-  # WinRM client must trust the target):
-  #   Set-Item WSMan:\localhost\Client\TrustedHosts -Value '*' -Force
-  # (or pin to specific IPs / a subnet pattern).
-  #
-  # And on the target machine (we deploy TO the prod VM, so WinRM server
-  # must accept us):
-  #   Enable-PSRemoting -SkipNetworkProfileCheck -Force
-  #   New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' \
-  #     -Name LocalAccountTokenFilterPolicy -PropertyType DWord -Value 1 -Force
-  #   Restart-Service WinRM
-  deploy:
-    needs: build
-    runs-on: [self-hosted, windows, x64]
-    if: ${{ github.event_name == 'workflow_dispatch' }}
-    steps:
-      - name: checkout (just for Deploy-Remote.ps1)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: download zip artifact
-        uses: actions/download-artifact@v3
-        with:
-          name: sapisrv-${{ needs.build.outputs.version }}-${{ github.sha }}.zip
-
-      - name: deploy via PSRemoting
-        shell: pwsh
-        env:
-          DEPLOY_HOST:     ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER:     ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
-        run: |
-          if (-not $env:DEPLOY_HOST)     { throw "DEPLOY_HOST secret not set" }
-          if (-not $env:DEPLOY_USER)     { throw "DEPLOY_USER secret not set" }
-          if (-not $env:DEPLOY_PASSWORD) { throw "DEPLOY_PASSWORD secret not set" }
-
-          $sec  = ConvertTo-SecureString $env:DEPLOY_PASSWORD -AsPlainText -Force
-          $cred = New-Object System.Management.Automation.PSCredential($env:DEPLOY_USER, $sec)
-          $zip  = ".\sapisrv-${{ needs.build.outputs.version }}.zip"
-          if (-not (Test-Path $zip)) {
-            Get-ChildItem | Out-String | Write-Host
-            throw "expected $zip after download-artifact, but it's not here"
-          }
-          .\deploy\Deploy-Remote.ps1 -ComputerName $env:DEPLOY_HOST -Credential $cred -ZipPath $zip
 
   # ---- Release --------------------------------------------------------
   # Tag-pushes only. Creates (or finds) a Gitea release for the tag, then
@@ -275,14 +123,9 @@ jobs:
       - name: download zip artifact
         uses: actions/download-artifact@v3
         with:
-          name: sapisrv-${{ needs.build.outputs.version }}-${{ github.sha }}.zip
+          name: sapicli-${{ needs.build.outputs.version }}-${{ github.sha }}.zip
 
-      - name: download installer artifact
-        uses: actions/download-artifact@v3
-        with:
-          name: sapisrv-setup-${{ needs.build.outputs.version }}-${{ github.sha }}.exe
-
-      - name: create release + upload assets
+      - name: create release + upload asset
         shell: pwsh
         env:
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -299,10 +142,8 @@ jobs:
           $base    = "$env:SERVER/api/v1/repos/$env:REPO"
           $headers = @{ Authorization = "token $env:GITEA_TOKEN" }
 
-          # Title comes from the tag annotation's first line; body from
-          # the rest. Defaults so we never POST empty strings to Gitea.
           $title = if ($env:TITLE) { $env:TITLE } else { $env:TAG }
-          $body  = if ($env:BODY)  { $env:BODY  } else { "Automated build of sapisrv $env:VERSION from commit $env:SHA." }
+          $body  = if ($env:BODY)  { $env:BODY  } else { "Automated build of sapicli $env:VERSION from commit $env:SHA." }
 
           $payload = @{
             tag_name   = $env:TAG
@@ -312,9 +153,9 @@ jobs:
             prerelease = $false
           } | ConvertTo-Json
 
-          # Re-run safety: if a release for this tag already exists,
-          # PATCH its name + body so a re-tag with a new annotation
-          # actually updates the visible title. Otherwise create.
+          # Re-run safety: if a release for this tag already exists, PATCH
+          # its name + body so a re-tag with a new annotation actually
+          # updates the visible title. Otherwise create.
           try {
             $rel = Invoke-RestMethod -Uri "$base/releases/tags/$env:TAG" -Headers $headers -ErrorAction Stop
             Invoke-RestMethod -Uri "$base/releases/$($rel.id)" -Method PATCH -Headers $headers `
@@ -326,29 +167,19 @@ jobs:
             Write-Host "Created release $env:TAG (id=$($rel.id), title='$title')"
           }
 
-          # Upload assets. Two artifacts -- the raw zip + the NSIS .exe
-          # installer. Both get attached to the release. Re-run safe:
-          # any existing same-name assets are deleted first so Gitea
-          # doesn't auto-rename the new upload.
-          $assets = @(
-            @{ Path = ".\sapisrv-$env:VERSION.zip";       Name = "sapisrv-$env:VERSION.zip" }
-            @{ Path = ".\sapisrv-setup-$env:VERSION.exe"; Name = "sapisrv-setup-$env:VERSION.exe" }
-          )
-          foreach ($asset in $assets) {
-            if (-not (Test-Path $asset.Path)) {
-              Get-ChildItem | Out-String | Write-Host
-              throw "expected $($asset.Path) after download-artifact, but it's not here"
-            }
-            $existing = $rel.assets | Where-Object { $_.name -eq $asset.Name }
-            if ($existing) {
-              Write-Host "Replacing existing asset $($asset.Name) (id=$($existing.id))"
-              Invoke-RestMethod -Uri "$base/releases/$($rel.id)/assets/$($existing.id)" `
-                                -Method DELETE -Headers $headers | Out-Null
-            }
-            # Gitea wants multipart/form-data with field name "attachment".
-            # PowerShell 7's -Form on Invoke-RestMethod handles the encoding.
-            $assetUrl = "$base/releases/$($rel.id)/assets?name=" + [Uri]::EscapeDataString($asset.Name)
-            Invoke-RestMethod -Uri $assetUrl -Method POST -Headers $headers `
-                              -Form @{ attachment = Get-Item $asset.Path } | Out-Null
-            Write-Host "Uploaded $($asset.Name) to release $env:TAG"
+          $assetPath = ".\sapicli-$env:VERSION.zip"
+          $assetName = "sapicli-$env:VERSION.zip"
+          if (-not (Test-Path $assetPath)) {
+            Get-ChildItem | Out-String | Write-Host
+            throw "expected $assetPath after download-artifact, but it's not here"
           }
+          $existing = $rel.assets | Where-Object { $_.name -eq $assetName }
+          if ($existing) {
+            Write-Host "Replacing existing asset $assetName (id=$($existing.id))"
+            Invoke-RestMethod -Uri "$base/releases/$($rel.id)/assets/$($existing.id)" `
+                              -Method DELETE -Headers $headers | Out-Null
+          }
+          $assetUrl = "$base/releases/$($rel.id)/assets?name=" + [Uri]::EscapeDataString($assetName)
+          Invoke-RestMethod -Uri $assetUrl -Method POST -Headers $headers `
+                            -Form @{ attachment = Get-Item $assetPath } | Out-Null
+          Write-Host "Uploaded $assetName to release $env:TAG"
