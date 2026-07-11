@@ -14,14 +14,40 @@
 #include <io.h>
 #include <fcntl.h>
 
-#include "core/encoders/encoder.h"
 #include "core/synth.h"
 #include "core/voices.h"
+
+extern "C" {
+#include <mux.h>
+}
+
+#include <memory>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #include "getoptw.h"
+
+// mux_sink_fn thunk: writes muxed encoder output to the Windows HANDLE passed
+// through the sink_user pointer. Returns non-zero on WriteFile failure so
+// mux_encoder_encode()/finalize() propagate it back up.
+static int mux_sink_write(void *user, const void *data, size_t size) {
+	HANDLE h = static_cast<HANDLE>(user);
+	const char *p = static_cast<const char*>(data);
+	while(size > 0) {
+		DWORD written = 0;
+		DWORD chunk = size > (DWORD)-1 ? (DWORD)-1 : (DWORD)size;
+		if(!WriteFile(h, p, chunk, &written, NULL) || written == 0) {
+			fwprintf(stderr, L"WriteFile failed in mux sink: %lu\n", GetLastError());
+			return 1;
+		}
+		p += written;
+		size -= written;
+	}
+	return 0;
+}
 
 const WCHAR *getErrorString(HRESULT r) {
 	switch(r) {
@@ -79,6 +105,72 @@ int listVoices() {
 		printJsonKeyPair(L"name", v.name.c_str());
 		printJsonKeyPair(L"vendor", v.vendor.c_str(), 1);
 		wprintf(i + 1 < voices.size() ? L"},\n" : L"}\n");
+	}
+	wprintf(L"]\n");
+	return 0;
+}
+
+// Print codec info (name, description, supported sample rates, encoder
+// params) as JSON to stdout — a straight passthrough of muxaudio's own
+// introspection tables.
+int listCodecs() {
+	const mux_codec_info* codecs = nullptr;
+	int count = 0;
+	if(mux_list_codecs(&codecs, &count) != MUX_OK || !codecs) {
+		fwprintf(stderr, L"mux_list_codecs failed\n");
+		return 1;
+	}
+
+	wprintf(L"[\n");
+	for(int i = 0; i < count; i++) {
+		wprintf(L"{\n");
+		wprintf(L"\"name\": \"%hs\",\n", codecs[i].name);
+		wprintf(L"\"description\": \"%hs\",\n", codecs[i].description);
+
+		mux_sample_rate_list rates{};
+		wprintf(L"\"sample_rates\": {");
+		if(mux_get_supported_sample_rates(codecs[i].type, &rates) == MUX_OK) {
+			wprintf(L"\"is_range\": %hs, \"values\": [", rates.is_range ? "true" : "false");
+			for(int j = 0; j < rates.count; j++) {
+				if(j) wprintf(L", ");
+				wprintf(L"%d", rates.rates[j]);
+			}
+			wprintf(L"]");
+		} else {
+			wprintf(L"\"is_range\": false, \"values\": []");
+		}
+		wprintf(L"},\n");
+
+		const mux_param_desc* pd = nullptr;
+		int pd_count = 0;
+		wprintf(L"\"params\": [");
+		if(mux_get_encoder_params(codecs[i].type, &pd, &pd_count) == MUX_OK && pd) {
+			for(int j = 0; j < pd_count; j++) {
+				if(j) wprintf(L", ");
+				wprintf(L"{\"name\": \"%hs\", \"description\": \"%hs\"", pd[j].name, pd[j].description);
+				switch(pd[j].type) {
+					case MUX_PARAM_TYPE_INT:
+						wprintf(L", \"type\": \"int\", \"min\": %d, \"max\": %d, \"default\": %d",
+						        pd[j].range.i.min, pd[j].range.i.max, pd[j].range.i.def);
+						break;
+					case MUX_PARAM_TYPE_FLOAT:
+						wprintf(L", \"type\": \"float\", \"min\": %g, \"max\": %g, \"default\": %g",
+						        pd[j].range.f.min, pd[j].range.f.max, pd[j].range.f.def);
+						break;
+					case MUX_PARAM_TYPE_BOOL:
+						wprintf(L", \"type\": \"bool\", \"default\": %hs",
+						        pd[j].range.b.def ? "true" : "false");
+						break;
+					case MUX_PARAM_TYPE_STRING:
+						wprintf(L", \"type\": \"string\", \"default\": \"%hs\"",
+						        pd[j].range.s.def ? pd[j].range.s.def : "");
+						break;
+				}
+				wprintf(L"}");
+			}
+		}
+		wprintf(L"]\n");
+		wprintf(i + 1 < count ? L"},\n" : L"}\n");
 	}
 	wprintf(L"]\n");
 	return 0;
@@ -149,7 +241,7 @@ static sapicli::SpeakMode mode_for_flags(DWORD flags) {
 	return sapicli::SpeakMode::Text;
 }
 
-int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, int rate, int volume, DWORD speakFlags, DWORD samplesPerSec, WORD bitsPerSample, WORD nChannels, ULONGLONG ullEventInterest, BOOL multiplex) {
+int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, int rate, int volume, DWORD speakFlags, DWORD samplesPerSec, WORD bitsPerSample, WORD nChannels, ULONGLONG ullEventInterest, BOOL multiplex, const std::vector<std::wstring>& codecParams) {
 	if(SP_IS_BAD_STRING_PTR(wavFilename)) {
 		fwprintf(stderr, L"Invalid filename\n");
 		return 1;
@@ -176,8 +268,22 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 
 	bool isStdout = wavFilename && wavFilename[0] == L'-' && wavFilename[1] == 0;
 
-	// Snap sample rate to one the chosen encoder accepts (matters for opus).
-	if(outType == 4) samplesPerSec = sapicli::snap_sample_rate(samplesPerSec, sapicli::Format::OggOpus);
+	// Resolve outType → mux codec (except 1=raw and 2=wav which bypass muxaudio).
+	mux_codec_type codec = MUX_CODEC_PCM;
+	if(outType == 3)      codec = MUX_CODEC_VORBIS;
+	else if(outType == 4) codec = MUX_CODEC_OPUS;
+	else if(outType == 5) codec = MUX_CODEC_MP3;
+
+	// For encoded outputs, refuse a sample rate the codec doesn't accept
+	// instead of silently rewriting it — makes voice/rate mismatches loud.
+	if(outType >= 3 && outType <= 5) {
+		if(mux_sample_rate_supported(codec, (int)samplesPerSec) != MUX_OK) {
+			fwprintf(stderr, L"Sample rate %lu Hz is not supported by codec '%hs'. "
+			                 L"See --list-codecs for accepted rates.\n",
+			        samplesPerSec, mux_codec_to_name(codec));
+			return 1;
+		}
+	}
 
 	try {
 		sapicli::Synthesizer synth;
@@ -217,7 +323,10 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 			}
 		}
 
-		std::unique_ptr<sapicli::Encoder> encoder;
+		// mux_encoder is a C handle; unique_ptr with the destroy fn gives it RAII.
+		std::unique_ptr<mux_encoder, decltype(&mux_encoder_destroy)>
+			enc(nullptr, mux_encoder_destroy);
+
 		if(outType == 1) {
 			// raw PCM: audio sink writes directly to the handle.
 			synth.set_audio_sink([h](const void* data, std::size_t len) {
@@ -225,33 +334,88 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 				WriteFile(h, data, (DWORD)len, &written, NULL);
 			});
 		} else {
-			sapicli::EncoderOptions opts{};
-			opts.audio.sample_rate = samplesPerSec;
-			opts.audio.channels = nChannels;
-			opts.audio.bits_per_sample = bitsPerSample;
-			opts.multiplex_events = encodes_events;
-			switch(outType) {
-				case 3: opts.format = sapicli::Format::OggVorbis; break;
-				case 4: opts.format = sapicli::Format::OggOpus; break;
-				case 5: opts.format = sapicli::Format::Mp3; break;
-				default:
-					fwprintf(stderr, L"Invalid output type %d\n", outType);
+			// Parse --param KEY=VALUE strings into a mux_param array. Both name
+			// and value backings live in these vectors — we reserve to their
+			// final size so subsequent push_back()s can't reallocate and
+			// invalidate the c_str() pointers we hand to muxaudio.
+			std::vector<std::string> param_names, param_values;
+			std::vector<mux_param> params;
+			param_names.reserve(codecParams.size());
+			param_values.reserve(codecParams.size());
+			params.reserve(codecParams.size());
+
+			for(const auto& w_kv : codecParams) {
+				int n = WideCharToMultiByte(CP_UTF8, 0, w_kv.c_str(), (int)w_kv.size(),
+				                            nullptr, 0, nullptr, nullptr);
+				std::string kv8(n, '\0');
+				if(n > 0) WideCharToMultiByte(CP_UTF8, 0, w_kv.c_str(), (int)w_kv.size(),
+				                              kv8.data(), n, nullptr, nullptr);
+				auto eq = kv8.find('=');
+				if(eq == std::string::npos) {
+					fwprintf(stderr, L"Invalid --param '%s': expected KEY=VALUE\n", w_kv.c_str());
 					if(!isStdout) CloseHandle(h);
 					return 1;
+				}
+				param_names.push_back(kv8.substr(0, eq));
+				param_values.push_back(kv8.substr(eq + 1));
+
+				// Look the parameter up so we know how to coerce the value.
+				const mux_param_desc* descs = nullptr;
+				int desc_count = 0;
+				mux_get_encoder_params(codec, &descs, &desc_count);
+				const mux_param_desc* desc = nullptr;
+				for(int i = 0; i < desc_count; i++) {
+					if(param_names.back() == descs[i].name) { desc = &descs[i]; break; }
+				}
+				if(!desc) {
+					fwprintf(stderr, L"Unknown --param '%hs' for codec '%hs'\n",
+					        param_names.back().c_str(), mux_codec_to_name(codec));
+					if(!isStdout) CloseHandle(h);
+					return 1;
+				}
+
+				mux_param p{};
+				p.name = param_names.back().c_str();
+				switch(desc->type) {
+					case MUX_PARAM_TYPE_INT:
+					case MUX_PARAM_TYPE_BOOL:
+						p.value.i = atoi(param_values.back().c_str());
+						break;
+					case MUX_PARAM_TYPE_FLOAT:
+						p.value.f = (float)atof(param_values.back().c_str());
+						break;
+					case MUX_PARAM_TYPE_STRING:
+						p.value.s = param_values.back().c_str();
+						break;
+				}
+				params.push_back(p);
 			}
-			encoder = sapicli::make_encoder(opts, [h](const void* data, std::size_t len) {
-				DWORD written;
-				WriteFile(h, data, (DWORD)len, &written, NULL);
-			});
-			sapicli::Encoder* enc = encoder.get();
-			synth.set_audio_sink([enc](const void* data, std::size_t len) {
-				enc->write_audio(data, len);
+
+			mux_encoder* raw = mux_encoder_new(codec, (int)samplesPerSec, nChannels,
+			                                   encodes_events ? 2 : 1,
+			                                   params.empty() ? nullptr : params.data(),
+			                                   (int)params.size(),
+			                                   &mux_sink_write, h);
+			if(!raw) {
+				fwprintf(stderr, L"mux_encoder_new failed for codec '%hs'\n",
+				        mux_codec_to_name(codec));
+				if(!isStdout) CloseHandle(h);
+				return 1;
+			}
+			enc.reset(raw);
+
+			mux_encoder* enc_ptr = enc.get();
+			synth.set_audio_sink([enc_ptr](const void* data, std::size_t len) {
+				int r = mux_encoder_encode(enc_ptr, data, len, MUX_STREAM_AUDIO);
+				if(r != MUX_OK) throw std::runtime_error("mux_encoder_encode(audio) failed");
 			});
 		}
 
-		synth.set_event_sink([&encoder, encodes_events, eh](const void* data, std::size_t len) {
-			if(encoder && encodes_events) {
-				encoder->write_event(data, len);
+		mux_encoder* enc_ptr = enc.get();
+		synth.set_event_sink([enc_ptr, encodes_events, eh](const void* data, std::size_t len) {
+			if(enc_ptr && encodes_events) {
+				int r = mux_encoder_encode(enc_ptr, data, len, MUX_STREAM_SIDE_CHANNEL);
+				if(r != MUX_OK) throw std::runtime_error("mux_encoder_encode(events) failed");
 			} else if(eh) {
 				DWORD written;
 				WriteFile(eh, data, (DWORD)len, &written, NULL);
@@ -260,7 +424,10 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 
 		synth.speak(text, mode_for_flags(speakFlags));
 
-		if(encoder) encoder->finish();
+		if(enc) {
+			int r = mux_encoder_finalize(enc.get());
+			if(r != MUX_OK) throw std::runtime_error("mux_encoder_finalize failed");
+		}
 		if(!isStdout) CloseHandle(h);
 		return 0;
 	} catch(const std::exception& e) {
@@ -276,6 +443,7 @@ int wmain(int argc, WCHAR *argv[]) {
 	const struct option long_options[] = {
 		{ L"help", no_argument, 0, L'h' },
 		{ L"list", no_argument, 0, L'l' },
+		{ L"list-codecs", no_argument, 0, L'C' },
 		{ L"output", required_argument, 0, L'o' },
 		{ L"out-type", required_argument, 0, L'T' },
 		{ L"voice", required_argument, 0, L'v' },
@@ -287,11 +455,13 @@ int wmain(int argc, WCHAR *argv[]) {
 		{ L"channels", required_argument, 0, L'c' },
 		{ L"events", required_argument, 0, L'e' },
 		{ L"multiplex", no_argument, 0, L'm' },
+		{ L"param", required_argument, 0, L'P' },
 		{ 0, 0, 0, 0 },
 	};
 
 	int help = 0;
 	int list = 0;
+	int listCodecsFlag = 0;
 	WCHAR *voice = 0;
 	WCHAR *wavFilename = 0;
 	DWORD speakFlags = 0;
@@ -302,11 +472,12 @@ int wmain(int argc, WCHAR *argv[]) {
 	ULONGLONG ullEventInterest = 0;
 	DWORD outType = 0;
 	BOOL multiplex = FALSE;
+	std::vector<std::wstring> codecParams;
 
 	int option;
 	int option_index = 0;
 	while(1) {
-		option = getoptW_long(argc, argv, L"hlo:T:v:t:r:Vs:b:c:e:m", long_options, &option_index);
+		option = getoptW_long(argc, argv, L"hlCo:T:v:t:r:Vs:b:c:e:mP:", long_options, &option_index);
 		if(option == L'?') {
 			return 1;
 		}
@@ -319,6 +490,12 @@ int wmain(int argc, WCHAR *argv[]) {
 				break;
 			case L'l':
 				list = 1;
+				break;
+			case L'C':
+				listCodecsFlag = 1;
+				break;
+			case L'P':
+				codecParams.emplace_back(optarg);
 				break;
 			case L'o':
 				wavFilename = optarg;
@@ -381,15 +558,18 @@ int wmain(int argc, WCHAR *argv[]) {
 		}
 	}
 
-	if(!list && optind >= argc)
+	if(!list && !listCodecsFlag && optind >= argc)
 		help = 1;
 
 	if(help) {
 		fwprintf(
 			stderr,
-			L"Usage: %s --list | [options] <text>\n"
+			L"Usage: %s --list | --list-codecs | [options] <text>\n"
 			L"  -h, --help                      Print this help.\n"
 			L"  -l, --list                      List all voices.\n"
+			L"  -C, --list-codecs               List built-in muxaudio codecs, their\n"
+			L"                                  supported sample rates and encoder\n"
+			L"                                  parameters (JSON).\n"
 			L"  -o, --output=FILE               Output file. Default is `output.wav`\n"
 			L"                                  Use `-' for stdout.\n"
 			L"  -T, --out-type=TYPE             Output file type. Default is `auto'\n"
@@ -424,7 +604,10 @@ int wmain(int argc, WCHAR *argv[]) {
 			L"                                  is non zero, events are output on\n"
 			L"                                  file descriptor 3.\n"
 			L"  -m, --multiplex                 Multiplex audio and speech event data into the\n"
-			L"                                  same output. See README.md for how this works.\n",
+			L"                                  same output. See README.md for how this works.\n"
+			L"  -P, --param=KEY=VALUE           Codec encoder parameter (may repeat). See\n"
+			L"                                  --list-codecs for names and ranges.\n"
+			L"                                  Example: -P bitrate=64 -P complexity=10\n",
 			argv[0]
 		);
 		return 1;
@@ -439,8 +622,10 @@ int wmain(int argc, WCHAR *argv[]) {
 	int ret = 0;
 	if(list) {
 		ret = listVoices();
+	} else if(listCodecsFlag) {
+		ret = listCodecs();
 	} else {
-		ret = speakToWav(argv[optind], voice, wavFilename, outType, rate, volume, speakFlags, samplesPerSec, bitsPerSample, nChannels, ullEventInterest, multiplex);
+		ret = speakToWav(argv[optind], voice, wavFilename, outType, rate, volume, speakFlags, samplesPerSec, bitsPerSample, nChannels, ullEventInterest, multiplex, codecParams);
 	}
 
 	::CoUninitialize();

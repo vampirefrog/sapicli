@@ -80,8 +80,6 @@
   <ItemGroup>
     <ClCompile Include="core\voices.cpp" />
     <ClCompile Include="core\synth.cpp" />
-    <ClCompile Include="core\encoders\encoder.cpp" />
-    <ClCompile Include="muxaudio\src\buffer.c" />
     <ClCompile Include="muxaudio\src\core.c" />
     <ClCompile Include="muxaudio\src\error.c" />
     <ClCompile Include="muxaudio\src\mux_leb128.c" />
@@ -95,7 +93,6 @@
   <ItemGroup>
     <ClInclude Include="core\voices.h" />
     <ClInclude Include="core\synth.h" />
-    <ClInclude Include="core\encoders\encoder.h" />
     <ClInclude Include="muxaudio\include\mux.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
