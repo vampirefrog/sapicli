@@ -111,23 +111,53 @@ sapicli::SpeakMode parse_mode(const std::wstring& v) {
 }
 
 struct FormatInfo {
-    sapicli::Format encoder_format;
-    bool is_raw;
-    const char* content_type;
+    mux_codec_type encoder_codec;
+    bool           is_raw;
+    const char*    content_type;
 };
 
+// Convert a wide query-string value to UTF-8 for muxaudio (codec names are ASCII).
+std::string wide_to_utf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
+                                nullptr, 0, nullptr, nullptr);
+    std::string out(n, '\0');
+    if (n > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
+                            out.data(), n, nullptr, nullptr);
+    }
+    return out;
+}
+
+// Recognises "raw" (bypass encoder + PCM content-type), legacy container
+// aliases ("ogg"/"ogg+vorbis"/"ogg+opus"), and any muxaudio canonical codec
+// name via mux_codec_from_name (opus, vorbis, mp3, pcm, flac, ...).
 bool parse_format(const std::wstring& v, FormatInfo& out) {
     if (v == L"raw") { out = { {}, true, "audio/L16" }; return true; }
+
+    // Explicit container/name aliases.
     if (v == L"ogg" || v == L"ogg+vorbis") {
-        out = { sapicli::Format::OggVorbis, false, "audio/ogg" }; return true;
+        out = { MUX_CODEC_VORBIS, false, "audio/ogg" }; return true;
     }
     if (v == L"ogg+opus") {
-        out = { sapicli::Format::OggOpus, false, "audio/ogg" }; return true;
+        out = { MUX_CODEC_OPUS,   false, "audio/ogg" }; return true;
     }
-    if (v == L"mp3") {
-        out = { sapicli::Format::Mp3, false, "audio/mpeg" }; return true;
+
+    // Fall back to muxaudio's own name table.
+    mux_codec_type c{};
+    if (!sapicli::codec_from_name(wide_to_utf8(v), c)) return false;
+    const char* ct = "application/octet-stream";
+    switch (c) {
+        case MUX_CODEC_VORBIS:
+        case MUX_CODEC_OPUS:
+        case MUX_CODEC_FLAC:   ct = "audio/ogg";  break;
+        case MUX_CODEC_MP3:    ct = "audio/mpeg"; break;
+        case MUX_CODEC_AAC:    ct = "audio/aac";  break;
+        case MUX_CODEC_PCM:    ct = "audio/L16";  break;
+        default: break;
     }
-    return false;
+    out = { c, false, ct };
+    return true;
 }
 
 void send_error(StreamWriter& out, int status, const char* status_text, const char* msg) {
@@ -165,7 +195,7 @@ void handle_synthesize(const std::wstring& query_string, StreamWriter& out) {
     uint32_t sample_rate = static_cast<uint32_t>(int_or(params, L"sample_rate", 22050));
     uint16_t channels = static_cast<uint16_t>(int_or(params, L"channels", 1));
     uint16_t bits = static_cast<uint16_t>(int_or(params, L"bits", 16));
-    if (!finfo.is_raw) sample_rate = sapicli::snap_sample_rate(sample_rate, finfo.encoder_format);
+    if (!finfo.is_raw) sample_rate = sapicli::snap_sample_rate(sample_rate, finfo.encoder_codec);
     uint64_t events = find(params, L"events") ? parse_events(*find(params, L"events")) : 0;
     bool multiplex = bool_or(params, L"multiplex", events != 0 && !finfo.is_raw);
     sapicli::SpeakMode mode = find(params, L"type") ? parse_mode(*find(params, L"type"))
@@ -189,6 +219,28 @@ void handle_synthesize(const std::wstring& query_string, StreamWriter& out) {
         synth.set_format({ sample_rate, channels, bits });
         synth.set_event_interest(events);
 
+        // Build encoder options + parse codec-specific overrides BEFORE
+        // committing 200 OK, so a bad ?param.foo=bar can still return 400
+        // instead of corrupting a partially-sent audio response.
+        sapicli::EncoderOptions opts{};
+        if (!finfo.is_raw) {
+            opts.codec = finfo.encoder_codec;
+            opts.audio = { sample_rate, channels, bits };
+            opts.multiplex_events = multiplex;
+            // ?param.bitrate=64&param.complexity=8 etc. Unknown/malformed
+            // params fail the request rather than silently encoding at defaults.
+            for (const auto& [k, v] : params) {
+                static const std::wstring prefix = L"param.";
+                if (k.rfind(prefix, 0) != 0) continue;
+                std::string kv = wide_to_utf8(k.substr(prefix.size())) + "=" + wide_to_utf8(v);
+                std::string err;
+                if (!opts.params.apply_kv(finfo.encoder_codec, kv, err)) {
+                    send_error(out, 400, "Bad Request", err.c_str());
+                    return;
+                }
+            }
+        }
+
         out.start(200, "OK", finfo.content_type);
 
         std::unique_ptr<sapicli::Encoder> encoder;
@@ -197,10 +249,6 @@ void handle_synthesize(const std::wstring& query_string, StreamWriter& out) {
                 out.write(data, len);
             });
         } else {
-            sapicli::EncoderOptions opts{};
-            opts.format = finfo.encoder_format;
-            opts.audio = { sample_rate, channels, bits };
-            opts.multiplex_events = multiplex;
             encoder = sapicli::make_encoder(opts, [&out](const void* data, std::size_t len) {
                 out.write(data, len);
             });

@@ -192,6 +192,9 @@ void dispatch(HANDLE queue, const HTTP_REQUEST* req) {
     else if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/voices")) {
         handle_voices(w);                    // unauthenticated, cheap
     }
+    else if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/codecs")) {
+        handle_codecs(w);                    // unauthenticated, static introspection
+    }
     else if (req->Verb == HttpVerbGET && path_equals(req->CookedUrl, L"/synthesize")) {
         AuthDecision auth = check_auth(authreq);
         if (!auth.allowed) {

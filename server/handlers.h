@@ -24,6 +24,11 @@ public:
 // GET /voices  → JSON array of available SAPI voices (buffered, single chunk).
 void handle_voices(StreamWriter& out);
 
+// GET /codecs  → JSON array of muxaudio codecs compiled into this build,
+// each with its supported sample rates and encoder parameters (introspected
+// via mux_list_codecs / mux_get_supported_sample_rates / mux_get_encoder_params).
+void handle_codecs(StreamWriter& out);
+
 // GET /health  → 200 with JSON {"status":"ok","pid":N,"uptime_s":N}.
 // Cheap and unauthenticated — meant for liveness probes / load balancers.
 void handle_health(StreamWriter& out);
