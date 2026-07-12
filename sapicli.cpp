@@ -13,7 +13,6 @@
 #include <initguid.h>
 #include <io.h>
 #include <fcntl.h>
-#include <msxml6.h>
 
 extern "C" {
 #include <mux.h>
@@ -21,7 +20,6 @@ extern "C" {
 
 #include <cstdlib>
 #include <functional>
-#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -336,257 +334,7 @@ int listCodecs() {
 	return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Lexemes: load custom SAPI pronunciations from a W3C PLS file
-// (https://www.w3.org/TR/pronunciation-lexicon/), like:
-//
-//   <?xml version="1.0" encoding="UTF-8"?>
-//   <lexicon version="1.0"
-//            xmlns="http://www.w3.org/2005/01/pronunciation-lexicon"
-//            alphabet="x-microsoft-sapi" xml:lang="en-US">
-//     <lexeme>
-//       <grapheme>zapfluk</grapheme>
-//       <phoneme>p iy t z ax</phoneme>
-//     </lexeme>
-//   </lexicon>
-//
-// * The <lexicon> `xml:lang` attribute is the default language for lexemes;
-//   individual <lexeme>s can override it with their own xml:lang.
-// * Only alphabet="x-microsoft-sapi" is understood (phonemes get fed to
-//   ISpPhoneConverter::PhoneToId as-is). IPA and other alphabets would need
-//   an alphabet mapping we don't have.
-// * Multiple <grapheme>s per <lexeme> = aliases -- each grapheme gets the
-//   same pronunciation. If a lexeme has multiple <phoneme>s (PLS allows
-//   pronunciation variants) we take the first, because SAPI's
-//   ISpLexicon::AddPronunciation only accepts one per (word, part-of-speech).
-//
-// AddPronunciation writes to the user's compound lexicon, which is
-// registry-backed and persistent -- entries survive across sapicli runs
-// and across reboots, and are visible to every SAPI 5 consumer on this
-// machine.
-// ---------------------------------------------------------------------------
-
-struct Lexeme {
-	LANGID       langId;
-	std::wstring word;
-	std::wstring phone;   // space-separated SAPI phoneme tokens
-};
-
-// "en-US" -> LANGID via LocaleNameToLCID. "0x0409" -> LANGID via strtoul.
-// Returns 0 on failure.
-static LANGID parseLang(const WCHAR* s) {
-	if(!s || !*s) return 0;
-	if(s[0] == L'0' && (s[1] == L'x' || s[1] == L'X')) {
-		return (LANGID)wcstoul(s, nullptr, 16);
-	}
-	LCID lcid = LocaleNameToLCID(s, 0);
-	if(lcid == 0) return 0;
-	return LANGIDFROMLCID(lcid);
-}
-
-// sapicli.exe's directory + "\lexemes.pls". Used when no --lexemes flag was
-// given; missing file at that path means silently no lexemes are loaded.
-static std::wstring defaultLexemesPath() {
-	WCHAR path[MAX_PATH];
-	DWORD n = GetModuleFileNameW(NULL, path, MAX_PATH);
-	if(n == 0 || n == MAX_PATH) return L"";
-	WCHAR* slash = wcsrchr(path, L'\\');
-	if(!slash) return L"";
-	*(slash + 1) = 0;
-	std::wstring out = path;
-	out += L"lexemes.pls";
-	return out;
-}
-
-// Trim leading + trailing whitespace (space, tab, CR, LF) in-place on a
-// wstring. PLS DOM `get_text()` includes intra-element whitespace and
-// newlines, which SAPI would otherwise treat as part of a phoneme token.
-static void trim(std::wstring& s) {
-	size_t b = s.find_first_not_of(L" \t\r\n");
-	size_t e = s.find_last_not_of(L" \t\r\n");
-	if(b == std::wstring::npos) { s.clear(); return; }
-	s = s.substr(b, e - b + 1);
-}
-
-// Look up an attribute on an element; returns empty wstring if missing.
-static std::wstring getAttr(IXMLDOMElement* el, const WCHAR* name) {
-	if(!el) return L"";
-	CComVariant v;
-	if(FAILED(el->getAttribute(CComBSTR(name), &v)) || v.vt != VT_BSTR) return L"";
-	return std::wstring(v.bstrVal ? v.bstrVal : L"");
-}
-
-// Parse a PLS file into a flat Lexeme list. Errors go to stderr; a totally
-// unreadable file returns empty.
-static std::vector<Lexeme> loadLexemesPls(const std::wstring& path) {
-	std::vector<Lexeme> out;
-
-	CComPtr<IXMLDOMDocument2> doc;
-	HRESULT hr = doc.CoCreateInstance(__uuidof(DOMDocument60));
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not create MSXML DOM: 0x%08x\n", (unsigned)hr);
-		return out;
-	}
-	doc->put_async(VARIANT_FALSE);
-	doc->put_validateOnParse(VARIANT_FALSE);
-	doc->put_resolveExternals(VARIANT_FALSE);
-
-	// Register the PLS namespace prefix so `//pls:lexeme` XPath queries work
-	// against files that declare the default xmlns as PLS (i.e. every
-	// well-formed PLS file).
-	doc->setProperty(CComBSTR(L"SelectionNamespaces"),
-	                 CComVariant(L"xmlns:pls='http://www.w3.org/2005/01/pronunciation-lexicon'"));
-
-	VARIANT_BOOL loaded = VARIANT_FALSE;
-	hr = doc->load(CComVariant(path.c_str()), &loaded);
-	if(FAILED(hr) || !loaded) {
-		CComPtr<IXMLDOMParseError> perr;
-		doc->get_parseError(&perr);
-		long code = 0;
-		CComBSTR reason;
-		if(perr) { perr->get_errorCode(&code); perr->get_reason(&reason); }
-		fwprintf(stderr, L"%s: PLS parse failed (code %ld) %s\n", path.c_str(),
-		        code, reason ? (WCHAR*)reason : L"");
-		return out;
-	}
-
-	CComPtr<IXMLDOMElement> root;
-	doc->get_documentElement(&root);
-	if(!root) return out;
-
-	// Alphabet: we can only feed SAPI phonemes through PhoneToId.
-	std::wstring alphabet = getAttr(root, L"alphabet");
-	if(!alphabet.empty() && alphabet != L"x-microsoft-sapi") {
-		fwprintf(stderr, L"%s: alphabet='%s' is unsupported; only 'x-microsoft-sapi' "
-		                 L"is understood (see SAPI phoneme tables).\n",
-		        path.c_str(), alphabet.c_str());
-		return out;
-	}
-
-	LANGID rootLang = parseLang(getAttr(root, L"xml:lang").c_str());
-
-	CComPtr<IXMLDOMNodeList> lexemes;
-	if(FAILED(doc->selectNodes(CComBSTR(L"//pls:lexeme"), &lexemes)) || !lexemes) return out;
-	long nlex = 0;
-	lexemes->get_length(&nlex);
-
-	for(long i = 0; i < nlex; i++) {
-		CComPtr<IXMLDOMNode> node;
-		lexemes->get_item(i, &node);
-		CComQIPtr<IXMLDOMElement> el(node);
-		if(!el) continue;
-
-		LANGID lang = rootLang;
-		LANGID overrideLang = parseLang(getAttr(el, L"xml:lang").c_str());
-		if(overrideLang) lang = overrideLang;
-		if(lang == 0) {
-			fwprintf(stderr, L"%s: lexeme #%ld has no xml:lang and no root default\n",
-			        path.c_str(), i + 1);
-			continue;
-		}
-
-		// PLS allows several <phoneme>s per <lexeme> as pronunciation variants;
-		// SAPI's AddPronunciation takes one, so pick the first.
-		CComPtr<IXMLDOMNode> phonemeNode;
-		el->selectSingleNode(CComBSTR(L".//pls:phoneme"), &phonemeNode);
-		if(!phonemeNode) {
-			fwprintf(stderr, L"%s: lexeme #%ld has no <phoneme>\n", path.c_str(), i + 1);
-			continue;
-		}
-		CComBSTR phoneBstr;
-		phonemeNode->get_text(&phoneBstr);
-		std::wstring phone = phoneBstr ? (WCHAR*)phoneBstr : L"";
-		trim(phone);
-		if(phone.empty()) {
-			fwprintf(stderr, L"%s: lexeme #%ld has empty <phoneme>\n", path.c_str(), i + 1);
-			continue;
-		}
-
-		// Multiple <grapheme>s = aliases; each maps to the same phoneme.
-		CComPtr<IXMLDOMNodeList> graphemes;
-		el->selectNodes(CComBSTR(L".//pls:grapheme"), &graphemes);
-		long ng = 0;
-		if(graphemes) graphemes->get_length(&ng);
-		if(ng == 0) {
-			fwprintf(stderr, L"%s: lexeme #%ld has no <grapheme>\n", path.c_str(), i + 1);
-			continue;
-		}
-		for(long g = 0; g < ng; g++) {
-			CComPtr<IXMLDOMNode> gnode;
-			graphemes->get_item(g, &gnode);
-			CComBSTR wordBstr;
-			gnode->get_text(&wordBstr);
-			std::wstring word = wordBstr ? (WCHAR*)wordBstr : L"";
-			trim(word);
-			if(word.empty()) continue;
-			out.push_back({ lang, word, phone });
-		}
-	}
-
-	return out;
-}
-
-// Load lexemes and register them with the SAPI compound (user) lexicon.
-// If explicitPath is empty, use the default (lexemes.txt next to sapicli.exe)
-// and treat a missing file as "no lexemes"; if it's set, a missing file is
-// an error.
-int addLexemes(const std::wstring& explicitPath) {
-	std::wstring path = explicitPath.empty() ? defaultLexemesPath() : explicitPath;
-	if(path.empty()) return 0;
-
-	if(_waccess(path.c_str(), 0) != 0) {
-		if(!explicitPath.empty()) {
-			fwprintf(stderr, L"Lexeme file not found: %s\n", path.c_str());
-			return 1;
-		}
-		return 0;   // default path: silent no-op if user didn't ship the file
-	}
-
-	auto lexemes = loadLexemesPls(path);
-	if(lexemes.empty()) return 0;
-
-	CComPtr<ISpLexicon> cpLexicon;
-	HRESULT hr = cpLexicon.CoCreateInstance(CLSID_SpLexicon);
-	if(FAILED(hr)) {
-		fwprintf(stderr, L"Could not instantiate lexicon: %d %s\n", hr, getErrorString(hr));
-		return 1;
-	}
-
-	// Phone converters are per-language; cache them so a file with many
-	// entries in the same language doesn't recreate one per line.
-	std::map<LANGID, CComPtr<ISpPhoneConverter>> converters;
-
-	for(const auto& lex : lexemes) {
-		auto& conv = converters[lex.langId];
-		if(!conv) {
-			hr = SpCreatePhoneConverter(lex.langId, NULL, NULL, &conv);
-			if(FAILED(hr)) {
-				fwprintf(stderr, L"Could not create phoneme converter for lang 0x%04x: %d %s\n",
-				        lex.langId, hr, getErrorString(hr));
-				continue;
-			}
-		}
-
-		SPPHONEID wszId[SP_MAX_PRON_LENGTH];
-		hr = conv->PhoneToId(lex.phone.c_str(), wszId);
-		if(FAILED(hr)) {
-			fwprintf(stderr, L"Could not convert phoneme '%s' -> id (0x%08x)\n",
-			        lex.phone.c_str(), (unsigned)hr);
-			continue;
-		}
-
-		hr = cpLexicon->AddPronunciation(lex.word.c_str(), lex.langId, SPPS_Noun, wszId);
-		if(FAILED(hr)) {
-			fwprintf(stderr, L"Could not add pronunciation for '%s': %d %s\n",
-			        lex.word.c_str(), hr, getErrorString(hr));
-			continue;
-		}
-	}
-
-	return 0;
-}
-
-int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, int rate, int volume, DWORD speakFlags, DWORD samplesPerSec, WORD bitsPerSample, WORD nChannels, ULONGLONG ullEventInterest, BOOL multiplex, const std::vector<std::wstring>& codecParams, const std::wstring& lexemesPath) {
+int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, int rate, int volume, DWORD speakFlags, DWORD samplesPerSec, WORD bitsPerSample, WORD nChannels, ULONGLONG ullEventInterest, BOOL multiplex, const std::vector<std::wstring>& codecParams) {
 	if(SP_IS_BAD_STRING_PTR(wavFilename)) {
 		fwprintf(stderr, L"Invalid filename\n");
 		return 1;
@@ -608,8 +356,6 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 			}
 		}
 	}
-
-	if(addLexemes(lexemesPath)) return 1;
 
 	bool isStdout = wavFilename && wavFilename[0] == L'-' && wavFilename[1] == 0;
 
@@ -837,7 +583,6 @@ int wmain(int argc, WCHAR *argv[]) {
 		{ L"events", required_argument, 0, L'e' },
 		{ L"multiplex", no_argument, 0, L'm' },
 		{ L"param", required_argument, 0, L'P' },
-		{ L"lexemes", required_argument, 0, L'L' },
 		{ 0, 0, 0, 0 },
 	};
 
@@ -855,12 +600,11 @@ int wmain(int argc, WCHAR *argv[]) {
 	DWORD outType = 0;
 	BOOL multiplex = FALSE;
 	std::vector<std::wstring> codecParams;
-	std::wstring lexemesPath;
 
 	int option;
 	int option_index = 0;
 	while(1) {
-		option = getoptW_long(argc, argv, L"hlCo:T:v:t:r:Vs:b:c:e:mP:L:", long_options, &option_index);
+		option = getoptW_long(argc, argv, L"hlCo:T:v:t:r:Vs:b:c:e:mP:", long_options, &option_index);
 		if(option == L'?') {
 			return 1;
 		}
@@ -879,9 +623,6 @@ int wmain(int argc, WCHAR *argv[]) {
 				break;
 			case L'P':
 				codecParams.emplace_back(optarg);
-				break;
-			case L'L':
-				lexemesPath = optarg;
 				break;
 			case L'o':
 				wavFilename = optarg;
@@ -993,14 +734,7 @@ int wmain(int argc, WCHAR *argv[]) {
 			L"                                  same output. See README.md for how this works.\n"
 			L"  -P, --param=KEY=VALUE           Codec encoder parameter (may repeat). See\n"
 			L"                                  --list-codecs for names and ranges.\n"
-			L"                                  Example: -P bitrate=64 -P complexity=10\n"
-			L"  -L, --lexemes=FILE              Load custom SAPI pronunciations from a W3C\n"
-			L"                                  PLS XML file. See lexemes.example.pls for\n"
-			L"                                  the format; only alphabet='x-microsoft-sapi'\n"
-			L"                                  is understood. Default: lexemes.pls next to\n"
-			L"                                  sapicli.exe if present; otherwise skipped.\n"
-			L"                                  Entries are added to the SAPI user lexicon\n"
-			L"                                  and persist across runs (registry-backed).\n",
+			L"                                  Example: -P bitrate=64 -P complexity=10\n",
 			argv[0]
 		);
 		return 1;
@@ -1018,7 +752,7 @@ int wmain(int argc, WCHAR *argv[]) {
 	} else if(listCodecsFlag) {
 		ret = listCodecs();
 	} else {
-		ret = speakToWav(argv[optind], voice, wavFilename, outType, rate, volume, speakFlags, samplesPerSec, bitsPerSample, nChannels, ullEventInterest, multiplex, codecParams, lexemesPath);
+		ret = speakToWav(argv[optind], voice, wavFilename, outType, rate, volume, speakFlags, samplesPerSec, bitsPerSample, nChannels, ullEventInterest, multiplex, codecParams);
 	}
 
 	::CoUninitialize();
