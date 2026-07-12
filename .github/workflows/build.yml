@@ -1,0 +1,145 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags:     ["v*"]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+# One push + tag arriving at the same SHA (typical `git push --follow-tags`)
+# fires the workflow twice. Cancel the older run; the tag run is the one we
+# want to keep because it also triggers the release job.
+concurrency:
+  group: build-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          # Win32 (x86): SAPI's voice registry under HKLM\SOFTWARE\WOW6432Node\
+          # ...\Speech\Voices is what most desktop installs of unencumbered TTS
+          # voices live in, so this is the primary target.
+          - { name: x86, platform: Win32, vcvars: amd64_x86 }
+          # x64: same source, different toolchain.
+          - { name: x64, platform: x64,   vcvars: amd64 }
+    runs-on: windows-latest
+
+    steps:
+      - name: checkout (with tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # release job needs tag annotations
+
+      - name: setup msbuild
+        uses: microsoft/setup-msbuild@v2
+
+      # ---- version derivation -------------------------------------------
+      # Tag `vX(.Y(.Z(.W)))` -> X.Y.Z.W (up to 4 parts). Non-tag builds get
+      # 0.0.0 so filenames stay stable.
+      - name: derive version
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $v = if ($tag -match '^v(\d+(?:\.\d+){0,3})') { $matches[1] } else { '0.0.0' }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # ---- build -----------------------------------------------------------
+      # muxaudio comes from the upstream v0.3 release. sapicli.vcxproj's
+      # pre-build target runs deploy\fetch-muxaudio.ps1 -Platform $(Platform),
+      # which downloads and stages the right (x86|x64) archive automatically.
+      - name: msbuild Release|${{ matrix.arch.platform }}
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.arch.vcvars }}
+          msbuild sapicli.sln -p:Configuration=Release -p:Platform=${{ matrix.arch.platform }} -p:PreferredToolArchitecture=x64 -nologo -m -v:minimal
+
+      # SAPI-less runners still return exit 0 (empty JSON array) so this
+      # smoke test is really just proving the exe loads muxaudio.dll and
+      # links cleanly.
+      - name: smoke test sapicli --list
+        run: ${{ matrix.arch.platform }}\Release\sapicli.exe --list
+
+      - name: zip sapicli.exe + muxaudio DLLs
+        shell: pwsh
+        run: |
+          $name = "sapicli-${{ steps.ver.outputs.version }}-${{ matrix.arch.name }}"
+          $zip  = "$pwd\$name.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          # sapicli.vcxproj's post-build already sprayed all the codec DLLs
+          # next to the exe, so shipping the folder is straightforward.
+          $files = @("${{ matrix.arch.platform }}\Release\sapicli.exe") +
+                   (Get-ChildItem "${{ matrix.arch.platform }}\Release\*.dll" | Select-Object -ExpandProperty FullName)
+          Compress-Archive -Path $files -DestinationPath $zip
+          Write-Host "Built $zip ($((Get-Item $zip).Length) bytes)"
+
+      - name: upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sapicli-${{ steps.ver.outputs.version }}-${{ matrix.arch.name }}
+          path: sapicli-${{ steps.ver.outputs.version }}-${{ matrix.arch.name }}.zip
+          retention-days: 30
+
+  # ---- Release --------------------------------------------------------
+  # Tag-pushes only. Fetches every arch's zip from the build job and attaches
+  # them all to a single GitHub release named after the tag.
+  release:
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required for gh release create/upload
+    steps:
+      - name: checkout (with tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true   # flatten arch-specific folders into dist/
+
+      - name: derive version
+        id: ver
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if [[ "$tag" =~ ^v([0-9]+(\.[0-9]+){0,3}) ]]; then
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: create release + upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          version="${{ steps.ver.outputs.version }}"
+
+          # Tag annotation drives the release title + body. Lightweight tags
+          # (no annotation) fall back to the tag name and a generic body.
+          title=$(git tag -l --format='%(contents:subject)' "$tag" | head -n1)
+          body=$(git tag -l --format='%(contents:body)' "$tag")
+          [ -n "$title" ] || title="$tag"
+          [ -n "$body"  ] || body="Automated build of sapicli $version from commit $GITHUB_SHA."
+
+          # Re-run safe: create only if missing, then --clobber assets so a
+          # retagged / re-run tag always ends up with the latest binaries.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$title" --notes "$body"
+          fi
+
+          gh release upload "$tag" \
+            "dist/sapicli-${version}-x86.zip" \
+            "dist/sapicli-${version}-x64.zip" \
+            --clobber
