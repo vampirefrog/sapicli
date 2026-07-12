@@ -9,4 +9,4 @@ vcpkg_installed/
 .build.log
 .build.log.err
 dist/
-muxaudio/build-wasm/
+third_party/

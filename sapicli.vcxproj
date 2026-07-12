@@ -24,10 +24,6 @@
     <ProjectGuid>{8b3a05d9-28c1-4c89-b90c-7409def9c273}</ProjectGuid>
     <RootNamespace>sapicli</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
-    <VcpkgEnableManifest>true</VcpkgEnableManifest>
-    <VcpkgTriplet Condition="'$(Platform)'=='Win32'">x86-windows-static</VcpkgTriplet>
-    <VcpkgTriplet Condition="'$(Platform)'=='x64'">x64-windows-static</VcpkgTriplet>
-    <VcpkgManifestRoot>$(SolutionDir)</VcpkgManifestRoot>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
@@ -57,18 +53,26 @@
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)muxaudio\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)third_party\muxaudio\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <!-- Vcpkg deps (vorbis/opus/lame/ogg). Listed explicitly here -->
-      <!-- because we set VcpkgEnableManifest=false in CI to skip the -->
-      <!-- broken BuildTools-bundled vcpkg auto-install; without that -->
-      <!-- auto-install msbuild's vcpkg.targets doesn't inject these. -->
-      <AdditionalLibraryDirectories>$(SolutionDir)vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ogg.lib;vorbis.lib;vorbisenc.lib;vorbisfile.lib;opus.lib;libmp3lame-static.lib;libmpghip-static.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- Link against the prebuilt muxaudio import lib. muxaudio.dll bundles -->
+      <!-- ogg/vorbis/opus/lame statically, so no vcpkg codec deps are needed. -->
+      <AdditionalLibraryDirectories>$(SolutionDir)third_party\muxaudio\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>muxaudio.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PreBuildEvent>
+      <!-- Idempotent: exits fast if third_party\muxaudio\ is already populated. -->
+      <Command>pwsh -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)deploy\fetch-muxaudio.ps1" -Destination "$(SolutionDir)third_party\muxaudio"</Command>
+      <Message>Ensuring muxaudio release is staged</Message>
+    </PreBuildEvent>
+    <PostBuildEvent>
+      <!-- muxaudio.dll must sit next to sapicli.exe for the loader to find it. -->
+      <Command>xcopy /y /d /q "$(SolutionDir)third_party\muxaudio\bin\muxaudio.dll" "$(OutDir)"</Command>
+      <Message>Copying muxaudio.dll next to sapicli.exe</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
     <ClCompile>
@@ -102,7 +106,6 @@
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>
-    <None Include="vcpkg.json" />
     <None Include="test.bat" />
     <None Include="zip.bat" />
   </ItemGroup>

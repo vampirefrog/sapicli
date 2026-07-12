@@ -23,12 +23,6 @@
     <ProjectGuid>{c6f37d50-1a2c-4f81-9a5d-3a9f5b2c4d11}</ProjectGuid>
     <RootNamespace>sapicore</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
-    <VcpkgEnableManifest>true</VcpkgEnableManifest>
-    <!-- Platform-conditional triplet so x86 / x64 builds pull from the right -->
-    <!-- vcpkg_installed/<triplet>/<triplet>/{include,lib} subtree.            -->
-    <VcpkgTriplet Condition="'$(Platform)'=='Win32'">x86-windows-static</VcpkgTriplet>
-    <VcpkgTriplet Condition="'$(Platform)'=='x64'">x64-windows-static</VcpkgTriplet>
-    <VcpkgManifestRoot>$(SolutionDir)</VcpkgManifestRoot>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
@@ -58,8 +52,7 @@
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)muxaudio\include;$(SolutionDir)muxaudio\src;$(SolutionDir)vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\include;$(SolutionDir)vcpkg_installed\$(VcpkgTriplet)\$(VcpkgTriplet)\include\opus;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>HAVE_VORBIS;HAVE_OPUS;HAVE_MP3;HAVE_MP3_ENCODE;HAVE_PCM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(SolutionDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DisableSpecificWarnings>4244;4267;4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
   </ItemDefinitionGroup>
@@ -80,20 +73,10 @@
   <ItemGroup>
     <ClCompile Include="core\voices.cpp" />
     <ClCompile Include="core\synth.cpp" />
-    <ClCompile Include="muxaudio\src\core.c" />
-    <ClCompile Include="muxaudio\src\error.c" />
-    <ClCompile Include="muxaudio\src\mux_leb128.c" />
-    <ClCompile Include="muxaudio\src\codec_pcm.c" />
-    <ClCompile Include="muxaudio\src\codec_alaw.c" />
-    <ClCompile Include="muxaudio\src\codec_mulaw.c" />
-    <ClCompile Include="muxaudio\src\codec_vorbis.c" />
-    <ClCompile Include="muxaudio\src\codec_opus.c" />
-    <ClCompile Include="muxaudio\src\codec_mp3.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="core\voices.h" />
     <ClInclude Include="core\synth.h" />
-    <ClInclude Include="muxaudio\include\mux.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

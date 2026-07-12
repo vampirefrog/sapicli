@@ -35,7 +35,7 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      # ---- vcpkg install + native build (x86) ---------------------------
+      # ---- native build (x86) --------------------------------------------
       # Building x86 (Win32) rather than x64 because SAPI's voice registry
       # is bitness-segregated under HKLM\SOFTWARE\WOW6432Node\Microsoft\
       # Speech\Voices for 32-bit consumers. Some installed voices on prod
@@ -43,10 +43,11 @@ jobs:
       # dialog -- which on a service running as NetworkService (no desktop)
       # blocks ISpVoice::Speak indefinitely. The 32-bit voice registry has
       # working unencumbered voices, so build 32-bit.
-      - name: vcpkg install (manifest mode, x86)
-        run: |
-          C:\vcpkg\vcpkg.exe install --triplet=x86-windows-static --x-manifest-root=. --x-install-root=.\vcpkg_installed\x86-windows-static
-
+      #
+      # muxaudio comes from the upstream v0.3 release as a self-contained
+      # bundled DLL (all codec libs statically linked into muxaudio.dll).
+      # sapicli.vcxproj's pre-build target runs deploy\fetch-muxaudio.ps1
+      # automatically, so no explicit stage step is needed here.
       - name: msbuild Release|Win32
         run: |
           REM Use the amd64_x86 cross-compiler (64-bit cl.exe targeting x86)
@@ -59,7 +60,7 @@ jobs:
           REM PreferredToolArchitecture=x64 keeps cl.exe out of WoW64.
           REM (Output is still x86; only the compiler host changes.)
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" amd64_x86
-          msbuild sapicli.sln -p:Configuration=Release -p:Platform=Win32 -p:PreferredToolArchitecture=x64 -p:VcpkgEnableManifest=false -nologo -m -v:minimal
+          msbuild sapicli.sln -p:Configuration=Release -p:Platform=Win32 -p:PreferredToolArchitecture=x64 -nologo -m -v:minimal
 
       - name: smoke test sapicli --list
         run: Win32\Release\sapicli.exe --list
@@ -95,12 +96,14 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value $body
           Add-Content -Path $env:GITHUB_OUTPUT -Value $eof
 
-      - name: zip sapicli.exe
+      - name: zip sapicli.exe + muxaudio.dll
         shell: pwsh
         run: |
           $zip = "$pwd\sapicli-${{ steps.ver.outputs.version }}.zip"
           if (Test-Path $zip) { Remove-Item $zip }
-          Compress-Archive -Path Win32\Release\sapicli.exe -DestinationPath $zip
+          # sapicli.vcxproj's post-build copies muxaudio.dll next to the
+          # exe, so grabbing everything from Win32\Release ships both.
+          Compress-Archive -Path Win32\Release\sapicli.exe,Win32\Release\muxaudio.dll -DestinationPath $zip
           Write-Host "Built $zip ($((Get-Item $zip).Length) bytes)"
 
       - name: upload zip artifact
