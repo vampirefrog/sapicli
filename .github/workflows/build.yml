@@ -35,8 +35,14 @@ jobs:
         with:
           fetch-depth: 0   # release job needs tag annotations
 
-      - name: setup msbuild
-        uses: microsoft/setup-msbuild@v2
+      # vcvarsall.bat wrapper: sets INCLUDE / LIB / PATH for the target arch
+      # and puts msbuild + cl on PATH for subsequent steps. Doing this via a
+      # manual `call "...\vcvarsall.bat"` is fragile on hosted runners where
+      # the VS install location changes across image versions.
+      - name: setup MSVC (${{ matrix.arch.vcvars }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch.vcvars }}
 
       # ---- version derivation -------------------------------------------
       # Tag `vX(.Y(.Z(.W)))` -> X.Y.Z.W (up to 4 parts). Non-tag builds get
@@ -55,9 +61,7 @@ jobs:
       # which downloads and stages the right (x86|x64) archive automatically.
       - name: msbuild Release|${{ matrix.arch.platform }}
         shell: cmd
-        run: |
-          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.arch.vcvars }}
-          msbuild sapicli.sln -p:Configuration=Release -p:Platform=${{ matrix.arch.platform }} -p:PreferredToolArchitecture=x64 -nologo -m -v:minimal
+        run: msbuild sapicli.sln -p:Configuration=Release -p:Platform=${{ matrix.arch.platform }} -nologo -m -v:minimal
 
       # SAPI-less runners still return exit 0 (empty JSON array) so this
       # smoke test is really just proving the exe loads muxaudio.dll and
