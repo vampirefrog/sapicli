@@ -79,8 +79,9 @@ jobs:
           $zip  = "$pwd\$name.zip"
           if (Test-Path $zip) { Remove-Item $zip }
           # sapicli.vcxproj's post-build already sprayed all the codec DLLs
-          # next to the exe, so shipping the folder is straightforward.
-          $files = @("${{ matrix.arch.platform }}\Release\sapicli.exe") +
+          # next to the exe. Ship those, plus lexemes.example.txt (rename it
+          # to lexemes.txt to activate the sample custom pronunciations).
+          $files = @("${{ matrix.arch.platform }}\Release\sapicli.exe", "lexemes.example.pls") +
                    (Get-ChildItem "${{ matrix.arch.platform }}\Release\*.dll" | Select-Object -ExpandProperty FullName)
           Compress-Archive -Path $files -DestinationPath $zip
           Write-Host "Built $zip ($((Get-Item $zip).Length) bytes)"
