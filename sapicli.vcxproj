@@ -104,11 +104,6 @@
     <ClInclude Include="sapierr.h" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="sapicore.vcxproj">
-      <Project>{c6f37d50-1a2c-4f81-9a5d-3a9f5b2c4d11}</Project>
-    </ProjectReference>
-  </ItemGroup>
-  <ItemGroup>
     <None Include="test.bat" />
     <None Include="zip.bat" />
   </ItemGroup>

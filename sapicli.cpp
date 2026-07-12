@@ -14,19 +14,16 @@
 #include <io.h>
 #include <fcntl.h>
 
-#include "core/synth.h"
-#include "core/voices.h"
-
 extern "C" {
 #include <mux.h>
 }
 
+#include <cstdlib>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #include "getoptw.h"
 
@@ -84,27 +81,188 @@ void printJsonKeyPair(const WCHAR *key, const WCHAR *value, int skipComma = 0) {
 		wprintf(L",\n");
 }
 
+// ---------------------------------------------------------------------------
+// SAPI helpers
+// ---------------------------------------------------------------------------
+
+namespace {
+
+WAVEFORMATEX make_wfex(DWORD sample_rate, WORD channels, WORD bits_per_sample) {
+	WAVEFORMATEX w{};
+	w.wFormatTag = WAVE_FORMAT_PCM;
+	w.nChannels = channels;
+	w.nSamplesPerSec = sample_rate;
+	w.wBitsPerSample = bits_per_sample;
+	w.nBlockAlign = w.nChannels * w.wBitsPerSample / 8;
+	w.nAvgBytesPerSec = w.nSamplesPerSec * w.nBlockAlign;
+	w.cbSize = 0;
+	return w;
+}
+
+// SAPI output stream that routes Write() to an audio callback and AddEvents()
+// to an event callback. SAPI QueryInterface()'s the output stream for
+// ISpEventSink and uses it for events when the interest mask is non-zero.
+// Stack-allocated by speakToWav(); AddRef/Release are no-ops.
+class SynthSink final : public ISpStream, public ISpEventSink {
+public:
+	using ByteSink = std::function<void(const void*, std::size_t)>;
+
+	SynthSink(const WAVEFORMATEX& wfex, ULONGLONG event_interest,
+	          ByteSink audio_sink, ByteSink event_sink)
+		: wfex_(wfex), event_interest_(event_interest),
+		  audio_sink_(std::move(audio_sink)), event_sink_(std::move(event_sink)) {}
+
+	// IUnknown
+	STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+		if (!ppv) return E_INVALIDARG;
+		*ppv = nullptr;
+		if (riid == IID_IUnknown || riid == IID_ISequentialStream || riid == IID_IStream
+				|| riid == IID_ISpStreamFormat || riid == IID_ISpStream) {
+			*ppv = static_cast<ISpStreamFormat*>(this);
+		} else if (riid == IID_ISpEventSink) {
+			*ppv = static_cast<ISpEventSink*>(this);
+		} else {
+			return E_NOINTERFACE;
+		}
+		return S_OK;
+	}
+	STDMETHODIMP_(ULONG) AddRef() override { return 1; }
+	STDMETHODIMP_(ULONG) Release() override { return 1; }
+
+	// ISequentialStream / IStream stubs
+	STDMETHODIMP Read(void*, ULONG, ULONG*) override { return S_OK; }
+	STDMETHODIMP Seek(LARGE_INTEGER move, DWORD, ULARGE_INTEGER* newpos) override {
+		if (newpos) newpos->QuadPart = move.QuadPart;
+		return S_OK;
+	}
+	STDMETHODIMP SetSize(ULARGE_INTEGER) override { return S_OK; }
+	STDMETHODIMP CopyTo(IStream*, ULARGE_INTEGER, ULARGE_INTEGER*, ULARGE_INTEGER*) override { return S_OK; }
+	STDMETHODIMP Commit(DWORD) override { return S_OK; }
+	STDMETHODIMP Revert() override { return S_OK; }
+	STDMETHODIMP LockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override { return S_OK; }
+	STDMETHODIMP UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override { return S_OK; }
+	STDMETHODIMP Stat(STATSTG*, DWORD) override { return S_OK; }
+	STDMETHODIMP Clone(IStream**) override { return S_OK; }
+
+	STDMETHODIMP Write(const void* buf, ULONG size, ULONG* written) override {
+		if (audio_sink_) audio_sink_(buf, size);
+		if (written) *written = size;
+		return S_OK;
+	}
+
+	// ISpStreamFormat
+	STDMETHODIMP GetFormat(GUID* format_id, WAVEFORMATEX** fmt) override {
+		if (format_id) *format_id = SPDFID_WaveFormatEx;
+		if (fmt) {
+			*fmt = (WAVEFORMATEX*)::CoTaskMemAlloc(sizeof(WAVEFORMATEX));
+			if (!*fmt) return E_OUTOFMEMORY;
+			CopyMemory(*fmt, &wfex_, sizeof(WAVEFORMATEX));
+		}
+		return S_OK;
+	}
+
+	// ISpStream
+	STDMETHODIMP SetBaseStream(IStream*, REFGUID, const WAVEFORMATEX*) override { return S_OK; }
+	STDMETHODIMP GetBaseStream(IStream**) override { return S_OK; }
+	STDMETHODIMP BindToFile(LPCWSTR, SPFILEMODE, const GUID*, const WAVEFORMATEX*, ULONGLONG) override {
+		return S_OK;
+	}
+	STDMETHODIMP Close() override { return S_OK; }
+
+	// ISpEventSink
+	STDMETHODIMP AddEvents(const SPEVENT* events, ULONG count) override {
+		if (!event_sink_) return S_OK;
+		for (ULONG i = 0; i < count; ++i) {
+			CSpEvent ev;
+			ev.CopyFrom(&events[i]);
+			ULONG sz = ev.SerializeSize<SPSERIALIZEDEVENT>();
+			std::vector<BYTE> buf(sz);
+			ev.Serialize<SPSERIALIZEDEVENT>(reinterpret_cast<SPSERIALIZEDEVENT*>(buf.data()));
+			event_sink_(buf.data(), sz);
+		}
+		return S_OK;
+	}
+	STDMETHODIMP GetEventInterest(ULONGLONG* mask) override {
+		if (mask) *mask = event_interest_;
+		return S_OK;
+	}
+
+private:
+	WAVEFORMATEX wfex_;
+	ULONGLONG event_interest_;
+	ByteSink audio_sink_;
+	ByteSink event_sink_;
+};
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Voice enumeration → JSON (SpEnumTokens fields piped straight to stdout;
+// no intermediate struct).
+// ---------------------------------------------------------------------------
 int listVoices() {
-	std::vector<sapicli::VoiceInfo> voices;
-	try {
-		voices = sapicli::enumerate_voices();
-	} catch(const std::exception& e) {
-		fwprintf(stderr, L"Could not enumerate voices: %hs\n", e.what());
+	CComPtr<IEnumSpObjectTokens> voicesEnum;
+	HRESULT hr = SpEnumTokens(SPCAT_VOICES, NULL, NULL, &voicesEnum);
+	if(FAILED(hr)) {
+		fwprintf(stderr, L"SpEnumTokens failed: 0x%08x\n", (unsigned)hr);
 		return 1;
 	}
 
+	ULONG count = 0;
+	voicesEnum->GetCount(&count);
+
+	// Print a JSON pair from a CoTaskMemAlloc'd string, then free it.
+	auto print_free = [](const WCHAR* key, WCHAR*& value, int last = 0) {
+		printJsonKeyPair(key, value ? value : L"", last);
+		if(value) { CoTaskMemFree(value); value = nullptr; }
+	};
+
 	wprintf(L"[\n");
-	for(size_t i = 0; i < voices.size(); i++) {
-		const auto& v = voices[i];
+	for(ULONG i = 0; i < count; i++) {
+		CComPtr<ISpObjectToken> token;
+		hr = voicesEnum->Next(1, &token, NULL);
+		if(FAILED(hr)) break;
+
 		wprintf(L"{\n");
-		printJsonKeyPair(L"id", v.id.c_str());
-		printJsonKeyPair(L"description", v.description.c_str());
-		printJsonKeyPair(L"age", v.age.c_str());
-		printJsonKeyPair(L"gender", v.gender.c_str());
-		printJsonKeyPair(L"language", v.language.c_str());
-		printJsonKeyPair(L"name", v.name.c_str());
-		printJsonKeyPair(L"vendor", v.vendor.c_str(), 1);
-		wprintf(i + 1 < voices.size() ? L"},\n" : L"}\n");
+
+		// id: basename of the registry token (e.g. TTS_MS_EN-US_DAVID_11.0).
+		WCHAR* idFull = nullptr;
+		token->GetId(&idFull);
+		WCHAR* basename = idFull ? wcsrchr(idFull, L'\\') : nullptr;
+		const WCHAR* id = (basename && basename[1]) ? basename + 1
+		                 : (idFull ? idFull : L"");
+		printJsonKeyPair(L"id", id);
+		if(idFull) CoTaskMemFree(idFull);
+
+		WCHAR* desc = nullptr;
+		SpGetDescription(token, &desc);
+		print_free(L"description", desc);
+
+		WCHAR *age = nullptr, *gender = nullptr, *lang = nullptr;
+		WCHAR *name = nullptr, *vendor = nullptr;
+		WCHAR locale[LOCALE_NAME_MAX_LENGTH] = {0};
+		CComPtr<ISpDataKey> attrs;
+		if(SUCCEEDED(token->OpenKey(L"Attributes", &attrs))) {
+			attrs->GetStringValue(L"Age", &age);
+			attrs->GetStringValue(L"Gender", &gender);
+			if(SUCCEEDED(attrs->GetStringValue(L"Language", &lang))) {
+				// SAPI stores Language as a hex LANGID string ("409" = en-US);
+				// prefer the BCP-47 locale name, fall back to the hex if it
+				// doesn't resolve.
+				int langId = wcstol(lang, nullptr, 16);
+				LCIDToLocaleName(langId, locale, LOCALE_NAME_MAX_LENGTH, 0);
+			}
+			attrs->GetStringValue(L"Name", &name);
+			attrs->GetStringValue(L"Vendor", &vendor);
+		}
+		print_free(L"age", age);
+		print_free(L"gender", gender);
+		printJsonKeyPair(L"language", locale[0] ? locale : (lang ? lang : L""));
+		if(lang) CoTaskMemFree(lang);
+		print_free(L"name", name);
+		print_free(L"vendor", vendor, 1);
+
+		wprintf(i + 1 < count ? L"},\n" : L"}\n");
 	}
 	wprintf(L"]\n");
 	return 0;
@@ -234,13 +392,6 @@ int addLexemes() {
 	return 0;
 }
 
-static sapicli::SpeakMode mode_for_flags(DWORD flags) {
-	if(flags & SPF_PARSE_SSML) return sapicli::SpeakMode::Ssml;
-	if(flags & SPF_PARSE_SAPI) return sapicli::SpeakMode::Sapi;
-	if(flags & SPF_PARSE_AUTODETECT) return sapicli::SpeakMode::Auto;
-	return sapicli::SpeakMode::Text;
-}
-
 int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, int rate, int volume, DWORD speakFlags, DWORD samplesPerSec, WORD bitsPerSample, WORD nChannels, ULONGLONG ullEventInterest, BOOL multiplex, const std::vector<std::wstring>& codecParams) {
 	if(SP_IS_BAD_STRING_PTR(wavFilename)) {
 		fwprintf(stderr, L"Invalid filename\n");
@@ -286,16 +437,43 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 	}
 
 	try {
-		sapicli::Synthesizer synth;
-		synth.set_voice(voiceId ? voiceId : L"");
-		synth.set_rate(rate);
-		synth.set_volume(volume);
-		synth.set_format({ samplesPerSec, nChannels, bitsPerSample });
-		synth.set_event_interest(ullEventInterest);
+		// SAPI voice — one ISpVoice bound to this thread's COM apartment.
+		CComPtr<ISpVoice> voice;
+		HRESULT hr = voice.CoCreateInstance(CLSID_SpVoice);
+		if(FAILED(hr)) {
+			fwprintf(stderr, L"CoCreateInstance(SpVoice) failed: 0x%08x\n", (unsigned)hr);
+			return 1;
+		}
+		if(voiceId && voiceId[0]) {
+			WCHAR full[MAX_PATH];
+			_snwprintf_s(full, MAX_PATH, _TRUNCATE,
+			             L"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\%s",
+			             voiceId);
+			CComPtr<ISpObjectToken> token;
+			hr = SpGetTokenFromId(full, &token);
+			if(FAILED(hr)) throw std::runtime_error("SpGetTokenFromId failed");
+			hr = voice->SetVoice(token);
+			if(FAILED(hr)) throw std::runtime_error("ISpVoice::SetVoice failed");
+		}
+		voice->SetRate(rate);
+		voice->SetVolume((USHORT)volume);
+
+		WAVEFORMATEX wfex = make_wfex(samplesPerSec, nChannels, bitsPerSample);
 
 		if(outType == 2) {
-			// WAV: SAPI native — handles RIFF + EVNT chunks itself.
-			synth.speak_to_wav_file(wavFilename, text, mode_for_flags(speakFlags));
+			// WAV: SAPI native ISpStream writes RIFF + EVNT chunks itself.
+			CComPtr<ISpStream> stream;
+			hr = ::CoCreateInstance(CLSID_SpStream, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&stream));
+			if(FAILED(hr)) throw std::runtime_error("CoCreateInstance(SpStream) failed");
+			hr = stream->BindToFile(wavFilename, SPFM_CREATE_ALWAYS,
+			                        &SPDFID_WaveFormatEx, &wfex, ullEventInterest);
+			if(FAILED(hr)) throw std::runtime_error("ISpStream::BindToFile failed");
+			hr = voice->SetOutput(stream, FALSE);
+			if(FAILED(hr)) throw std::runtime_error("ISpVoice::SetOutput failed");
+			hr = voice->Speak(text, speakFlags, nullptr);
+			voice->SetOutput(nullptr, FALSE);
+			stream->Close();
+			if(FAILED(hr)) throw std::runtime_error("ISpVoice::Speak failed");
 			return 0;
 		}
 
@@ -327,12 +505,13 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 		std::unique_ptr<mux_encoder, decltype(&mux_encoder_destroy)>
 			enc(nullptr, mux_encoder_destroy);
 
+		SynthSink::ByteSink audio_sink;
 		if(outType == 1) {
-			// raw PCM: audio sink writes directly to the handle.
-			synth.set_audio_sink([h](const void* data, std::size_t len) {
+			// raw PCM: audio bytes go straight to the handle.
+			audio_sink = [h](const void* data, std::size_t len) {
 				DWORD written;
 				WriteFile(h, data, (DWORD)len, &written, NULL);
-			});
+			};
 		} else {
 			// Parse --param KEY=VALUE strings into a mux_param array. Both name
 			// and value backings live in these vectors — we reserve to their
@@ -364,8 +543,8 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 				int desc_count = 0;
 				mux_get_encoder_params(codec, &descs, &desc_count);
 				const mux_param_desc* desc = nullptr;
-				for(int i = 0; i < desc_count; i++) {
-					if(param_names.back() == descs[i].name) { desc = &descs[i]; break; }
+				for(int j = 0; j < desc_count; j++) {
+					if(param_names.back() == descs[j].name) { desc = &descs[j]; break; }
 				}
 				if(!desc) {
 					fwprintf(stderr, L"Unknown --param '%hs' for codec '%hs'\n",
@@ -405,14 +584,14 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 			enc.reset(raw);
 
 			mux_encoder* enc_ptr = enc.get();
-			synth.set_audio_sink([enc_ptr](const void* data, std::size_t len) {
+			audio_sink = [enc_ptr](const void* data, std::size_t len) {
 				int r = mux_encoder_encode(enc_ptr, data, len, MUX_STREAM_AUDIO);
 				if(r != MUX_OK) throw std::runtime_error("mux_encoder_encode(audio) failed");
-			});
+			};
 		}
 
 		mux_encoder* enc_ptr = enc.get();
-		synth.set_event_sink([enc_ptr, encodes_events, eh](const void* data, std::size_t len) {
+		SynthSink::ByteSink event_sink = [enc_ptr, encodes_events, eh](const void* data, std::size_t len) {
 			if(enc_ptr && encodes_events) {
 				int r = mux_encoder_encode(enc_ptr, data, len, MUX_STREAM_SIDE_CHANNEL);
 				if(r != MUX_OK) throw std::runtime_error("mux_encoder_encode(events) failed");
@@ -420,9 +599,17 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 				DWORD written;
 				WriteFile(eh, data, (DWORD)len, &written, NULL);
 			}
-		});
+		};
 
-		synth.speak(text, mode_for_flags(speakFlags));
+		SynthSink sink(wfex, ullEventInterest, std::move(audio_sink), std::move(event_sink));
+		hr = voice->SetOutput(static_cast<ISpStreamFormat*>(&sink), FALSE);
+		if(FAILED(hr)) throw std::runtime_error("ISpVoice::SetOutput failed");
+		hr = voice->Speak(text, speakFlags, nullptr);
+		// Release ISpVoice's reference to our stack-allocated sink BEFORE it
+		// goes out of scope; otherwise the voice still points at a dead stack
+		// object and crashes on next teardown. Do this even if Speak failed.
+		voice->SetOutput(nullptr, FALSE);
+		if(FAILED(hr)) throw std::runtime_error("ISpVoice::Speak failed");
 
 		if(enc) {
 			int r = mux_encoder_finalize(enc.get());
