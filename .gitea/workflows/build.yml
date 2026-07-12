@@ -96,14 +96,16 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value $body
           Add-Content -Path $env:GITHUB_OUTPUT -Value $eof
 
-      - name: zip sapicli.exe + muxaudio.dll
+      - name: zip sapicli.exe + muxaudio DLLs
         shell: pwsh
         run: |
           $zip = "$pwd\sapicli-${{ steps.ver.outputs.version }}.zip"
           if (Test-Path $zip) { Remove-Item $zip }
-          # sapicli.vcxproj's post-build copies muxaudio.dll next to the
-          # exe, so grabbing everything from Win32\Release ships both.
-          Compress-Archive -Path Win32\Release\sapicli.exe,Win32\Release\muxaudio.dll -DestinationPath $zip
+          # sapicli.vcxproj's post-build already sprayed all of
+          # third_party\muxaudio\Win32\bin\*.dll next to the exe, so the
+          # release zip is just "Win32\Release\sapicli.exe + every .dll".
+          $files = @('Win32\Release\sapicli.exe') + (Get-ChildItem 'Win32\Release\*.dll' | Select-Object -ExpandProperty FullName)
+          Compress-Archive -Path $files -DestinationPath $zip
           Write-Host "Built $zip ($((Get-Item $zip).Length) bytes)"
 
       - name: upload zip artifact

@@ -1,54 +1,65 @@
 <#
 .SYNOPSIS
-  Download and stage the prebuilt muxaudio bundled x86 shared release.
+  Download and stage the prebuilt muxaudio shared release for a given platform.
 
 .DESCRIPTION
-  We build sapicli.exe as Win32 (x86) — see build.yml for the SAPI voice
-  registry reason — and link against the release build of muxaudio instead
-  of compiling from source. The `bundled` variant is fully self-contained:
-  all codec libraries (libogg, libvorbis, libopus, libmp3lame) are
-  statically linked into muxaudio.dll, so we only need to ship that one
-  binary alongside sapicli.exe.
+  We link against muxaudio.lib and ship the muxaudio.dll (and its codec-DLL
+  dependencies: ogg / vorbis / opus / mpg123 / FLAC / fdk-aac / ...) alongside
+  sapicli.exe. This script downloads the platform-appropriate archive from
+  the muxaudio GitHub release and stages it into:
 
-  Idempotent: skips the download if the expected files are already present
-  and match. Called from sapicore.vcxproj as a pre-build target and from
-  the CI workflow.
+    Destination\include\mux.h                (platform-independent header)
+    Destination\<Platform>\lib\muxaudio.lib  (import lib for the linker)
+    Destination\<Platform>\bin\*.dll         (runtime DLLs for the loader)
+
+  Idempotent: skips the download if the expected paths for <Platform> are
+  already present. Called from sapicli.vcxproj as a pre-build target and
+  from the CI workflow.
+
+.PARAMETER Platform
+  MSBuild platform name: "Win32" (x86) or "x64". Maps to the corresponding
+  muxaudio-windows-{x86,x64}-shared.zip release asset.
 
 .PARAMETER Version
   muxaudio release tag to fetch (default: v0.3).
 
 .PARAMETER Destination
-  Directory to stage into. mux.h -> Destination\include\mux.h,
-  muxaudio.lib -> Destination\lib\muxaudio.lib, muxaudio.dll ->
-  Destination\bin\muxaudio.dll.
+  Directory to stage into. Layout above.
 
 .PARAMETER Force
   Re-download even if the destination is already populated.
 #>
 [CmdletBinding()]
 param(
-  [string] $Version = 'v0.3',
+  [ValidateSet('Win32', 'x64')]
+  [string] $Platform = 'Win32',
+  [string] $Version  = 'v0.3',
   [string] $Destination = (Join-Path $PSScriptRoot '..\third_party\muxaudio'),
   [switch] $Force
 )
 
 $ErrorActionPreference = 'Stop'
 
-$assetName = 'muxaudio-windows-x86-shared-bundled.zip'
+# Map MSBuild's platform names to muxaudio's release-asset naming.
+$arch = if ($Platform -eq 'Win32') { 'x86' } else { 'x64' }
+$assetName = "muxaudio-windows-$arch-shared.zip"
 $url       = "https://github.com/vampirefrog/muxaudio/releases/download/$Version/$assetName"
 
 $destInc = Join-Path $Destination 'include'
-$destLib = Join-Path $Destination 'lib'
-$destBin = Join-Path $Destination 'bin'
+$destLib = Join-Path $Destination "$Platform\lib"
+$destBin = Join-Path $Destination "$Platform\bin"
 
-$targets = @(
+# Presence check: the header at include/, the import lib under <Platform>/lib,
+# and at least the main DLL under <Platform>/bin. Codec DLLs get overwritten
+# each time we stage; we don't try to enumerate them here.
+$sentinels = @(
   Join-Path $destInc 'mux.h'
   Join-Path $destLib 'muxaudio.lib'
   Join-Path $destBin 'muxaudio.dll'
 )
 
-if (-not $Force -and ($targets | ForEach-Object { Test-Path $_ }) -notcontains $false) {
-  Write-Host "muxaudio $Version already staged at $Destination"
+if (-not $Force -and ($sentinels | ForEach-Object { Test-Path $_ }) -notcontains $false) {
+  Write-Host "muxaudio $Version ($Platform) already staged at $Destination"
   exit 0
 }
 
@@ -62,7 +73,7 @@ try {
   Write-Host "Extracting ..."
   Expand-Archive -Path $zip -DestinationPath $tmp -Force
 
-  # The zip's top-level directory is "windows-x86-shared-bundled/".
+  # The zip's top-level directory is "windows-<arch>-shared/".
   $extracted = Get-ChildItem -Path $tmp -Directory | Select-Object -First 1
   if (-not $extracted) { throw "expected a top-level directory inside $assetName" }
 
@@ -72,9 +83,15 @@ try {
 
   Copy-Item (Join-Path $extracted.FullName 'mux.h')        (Join-Path $destInc 'mux.h')        -Force
   Copy-Item (Join-Path $extracted.FullName 'muxaudio.lib') (Join-Path $destLib 'muxaudio.lib') -Force
-  Copy-Item (Join-Path $extracted.FullName 'muxaudio.dll') (Join-Path $destBin 'muxaudio.dll') -Force
 
-  Write-Host "Staged muxaudio $Version at $Destination"
+  # Sweep every DLL from the shared bundle into <Platform>/bin. sapicli's
+  # post-build copies the lot to $(OutDir), which mirrors what the release
+  # zip ships.
+  Get-ChildItem -Path $extracted.FullName -Filter *.dll | ForEach-Object {
+    Copy-Item $_.FullName (Join-Path $destBin $_.Name) -Force
+  }
+
+  Write-Host "Staged muxaudio $Version ($Platform) at $Destination"
 } finally {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

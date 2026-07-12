@@ -58,20 +58,23 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <!-- Link against the prebuilt muxaudio import lib. muxaudio.dll bundles -->
-      <!-- ogg/vorbis/opus/lame statically, so no vcpkg codec deps are needed. -->
-      <AdditionalLibraryDirectories>$(SolutionDir)third_party\muxaudio\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <!-- Link against the prebuilt muxaudio import lib for this platform.  -->
+      <!-- muxaudio.dll dynamically loads its codec DLLs (ogg/vorbis/opus/    -->
+      <!-- mpg123/FLAC/fdk-aac/...), all of which we ship alongside.          -->
+      <AdditionalLibraryDirectories>$(SolutionDir)third_party\muxaudio\$(Platform)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>muxaudio.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
-      <!-- Idempotent: exits fast if third_party\muxaudio\ is already populated. -->
-      <Command>pwsh -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)deploy\fetch-muxaudio.ps1" -Destination "$(SolutionDir)third_party\muxaudio"</Command>
-      <Message>Ensuring muxaudio release is staged</Message>
+      <!-- Idempotent: exits fast if the platform's third_party bin/lib is    -->
+      <!-- already populated. Fetches the right x86 / x64 zip per Platform.   -->
+      <Command>pwsh -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)deploy\fetch-muxaudio.ps1" -Platform $(Platform) -Destination "$(SolutionDir)third_party\muxaudio"</Command>
+      <Message>Ensuring muxaudio release is staged for $(Platform)</Message>
     </PreBuildEvent>
     <PostBuildEvent>
-      <!-- muxaudio.dll must sit next to sapicli.exe for the loader to find it. -->
-      <Command>xcopy /y /d /q "$(SolutionDir)third_party\muxaudio\bin\muxaudio.dll" "$(OutDir)"</Command>
-      <Message>Copying muxaudio.dll next to sapicli.exe</Message>
+      <!-- Sweep every DLL from the platform's third_party bin next to      -->
+      <!-- sapicli.exe so the loader (and the release zip) find everything. -->
+      <Command>xcopy /y /d /q "$(SolutionDir)third_party\muxaudio\$(Platform)\bin\*.dll" "$(OutDir)"</Command>
+      <Message>Copying muxaudio DLLs next to sapicli.exe</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
