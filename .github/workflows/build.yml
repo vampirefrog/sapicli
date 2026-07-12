@@ -34,7 +34,7 @@ jobs:
 
     steps:
       - name: checkout (with tags)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0   # release job needs tag annotations
 
@@ -86,7 +86,7 @@ jobs:
           Write-Host "Built $zip ($((Get-Item $zip).Length) bytes)"
 
       - name: upload zip artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sapicli-${{ steps.ver.outputs.version }}-${{ matrix.arch.name }}
           path: sapicli-${{ steps.ver.outputs.version }}-${{ matrix.arch.name }}.zip
@@ -103,12 +103,12 @@ jobs:
       contents: write   # required for gh release create/upload
     steps:
       - name: checkout (with tags)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true   # flatten arch-specific folders into dist/
@@ -140,10 +140,17 @@ jobs:
           [ -n "$title" ] || title="$tag"
           [ -n "$body"  ] || body="Automated build of sapicli $version from commit $GITHUB_SHA."
 
+          # Anything after the numeric part (v1.2.3-alpha, v1.2.3-rc1, ...)
+          # marks the release as pre-release.
+          prerelease=""
+          if [[ "$tag" =~ ^v[0-9]+(\.[0-9]+){0,3}[-.]. ]]; then
+            prerelease="--prerelease"
+          fi
+
           # Re-run safe: create only if missing, then --clobber assets so a
           # retagged / re-run tag always ends up with the latest binaries.
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --title "$title" --notes "$body"
+            gh release create "$tag" $prerelease --title "$title" --notes "$body"
           fi
 
           gh release upload "$tag" \
