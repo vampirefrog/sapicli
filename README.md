@@ -6,7 +6,7 @@
 A Windows command-line frontend for [SAPI 5](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/ms720161(v=vs.85))
 text-to-speech.
 
-The release ship two small tools:
+Includes two small tools:
 
 - **`sapicli`** — synthesize text into audio. Raw PCM, WAV, Ogg Vorbis, Ogg
   Opus, or MP3, with optional interleaved SAPI events (word boundary,
@@ -14,9 +14,7 @@ The release ship two small tools:
 - **`sapilex`** — edit the SAPI user pronunciation lexicon. Loads and dumps
   [W3C PLS 1.0](https://www.w3.org/TR/pronunciation-lexicon/) XML files.
 
-Encoding is done by [muxaudio](https://github.com/vampirefrog/muxaudio); the
-corresponding DLLs ship in the release zip so nothing else is needed on the
-target machine.
+Encoding is done by [muxaudio](https://github.com/vampirefrog/muxaudio).
 
 ---
 
