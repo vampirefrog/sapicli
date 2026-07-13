@@ -11,7 +11,7 @@
 
   Entries are added to the SAPI user lexicon which is registry-backed and
   survives across runs / reboots (and is shared with every other SAPI 5
-  client on this machine). See `sapilex --help`.
+  client on this machine). See `sapilex -h`.
 
   * xml:lang on <lexicon> is the default language for lexemes; individual
     <lexeme> elements can override it with their own xml:lang.
