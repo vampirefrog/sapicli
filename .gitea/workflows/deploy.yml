@@ -1,0 +1,172 @@
+name: deploy
+
+# Manual-only. Triggered from the Gitea Actions UI ("Run workflow"), or via
+# the API:
+#   curl -X POST -H "Authorization: token <gitea-token>" \
+#     <gitea-url>/api/v1/repos/<owner>/<repo>/actions/workflows/deploy.yml/dispatches \
+#     -d '{"ref": "master", "inputs": {"target_host": "10.0.0.42"}}'
+#
+# ---- One-time setup ---------------------------------------------------
+#
+# On the Gitea runner (Windows, self-hosted, needs the labels "self-hosted"
+# and "windows"):
+#
+#   Set-Item WSMan:\localhost\Client\TrustedHosts -Value '*' -Force -Concatenate
+#
+#   (Or pin to specific IPs / a subnet if you don't want to trust everything.)
+#
+# On each target machine:
+#
+#   Enable-PSRemoting -SkipNetworkProfileCheck -Force
+#   # If auth as a local account rather than a domain account:
+#   New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+#     -Name LocalAccountTokenFilterPolicy -PropertyType DWord -Value 1 -Force
+#   Restart-Service WinRM
+#
+# In the Gitea repo -> Settings -> Actions -> Secrets:
+#
+#   DEPLOY_USER      "<COMPUTER>\<user>" for a local account, "<DOMAIN>\<user>"
+#                    for a domain one. This account needs local admin on the
+#                    target so it can write to %ProgramFiles% and PATH.
+#   DEPLOY_PASSWORD  its password.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_host:
+        description: 'Target machine hostname or IP'
+        required: true
+        type: string
+      arch:
+        description: 'Architecture to deploy'
+        required: true
+        default: x86
+        type: choice
+        options: [x86, x64]
+      release_tag:
+        description: 'Release tag (leave blank for latest)'
+        required: false
+        type: string
+        default: ''
+      install_dir:
+        description: 'Install directory on the target'
+        required: false
+        type: string
+        default: 'C:\Program Files\sapicli'
+      add_to_path:
+        description: 'Add the install directory to the target system PATH'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, windows]
+    steps:
+      # ---- Fetch the release zip from GitHub -----------------------------
+      # We ship what CI built, verbatim. Anonymous unauthenticated request;
+      # the releases are public.
+      - name: Download release zip
+        id: fetch
+        shell: pwsh
+        run: |
+          $tag = '${{ inputs.release_tag }}'
+          if (-not $tag) {
+            $tag = (Invoke-RestMethod https://api.github.com/repos/vampirefrog/sapicli/releases/latest -UseBasicParsing).tag_name
+            Write-Host "Latest release: $tag"
+          }
+          $version = if ($tag -match '^v(.+)$') { $matches[1] } else { $tag }
+          $zip = "sapicli-$version-${{ inputs.arch }}.zip"
+          $url = "https://github.com/vampirefrog/sapicli/releases/download/$tag/$zip"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+          $size = (Get-Item $zip).Length
+          Write-Host "Downloaded $zip ($size bytes)"
+          if ($size -lt 100000) { throw "$zip is suspiciously small ($size bytes); aborting." }
+          "zip=$zip"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # ---- Push to target via PSRemoting --------------------------------
+      # 1. Open a PSSession with cred from secrets.
+      # 2. Stop any running sapicli.exe / sapilex.exe (in case someone left
+      #    one open) so ExpandArchive won't fail on locked files.
+      # 3. Copy the zip to the target's %TEMP%.
+      # 4. Expand into the install dir; overwrite the shipped files, leave any
+      #    user files (e.g. a custom lexemes.pls dropped in there) alone.
+      # 5. Optionally prepend the install dir to the system PATH.
+      # 6. Sanity-check: run `sapicli.exe --list` and require exit 0.
+      - name: Deploy via PSRemoting
+        shell: pwsh
+        env:
+          DEPLOY_HOST:     ${{ inputs.target_host }}
+          DEPLOY_USER:     ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
+          INSTALL_DIR:     ${{ inputs.install_dir }}
+          ADD_TO_PATH:     ${{ inputs.add_to_path }}
+          ZIP:             ${{ steps.fetch.outputs.zip }}
+          VERSION:         ${{ steps.fetch.outputs.version }}
+        run: |
+          if (-not $env:DEPLOY_USER)     { throw 'DEPLOY_USER secret not set' }
+          if (-not $env:DEPLOY_PASSWORD) { throw 'DEPLOY_PASSWORD secret not set' }
+
+          $sec  = ConvertTo-SecureString $env:DEPLOY_PASSWORD -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential($env:DEPLOY_USER, $sec)
+
+          $session = New-PSSession -ComputerName $env:DEPLOY_HOST -Credential $cred -ErrorAction Stop
+          try {
+            $remoteTemp = Invoke-Command -Session $session -ScriptBlock {
+              $t = Join-Path $env:TEMP "sapicli-deploy-$([guid]::NewGuid().ToString('N'))"
+              New-Item -ItemType Directory -Path $t -Force | Out-Null
+              $t
+            }
+            Write-Host "Remote temp: $remoteTemp"
+
+            Copy-Item -ToSession $session -Path $env:ZIP -Destination $remoteTemp
+            Write-Host "Copied $env:ZIP -> $remoteTemp"
+
+            Invoke-Command -Session $session `
+                           -ArgumentList $remoteTemp, $env:ZIP, $env:INSTALL_DIR, $env:VERSION, $env:ADD_TO_PATH `
+                           -ScriptBlock {
+              param($remoteTemp, $zipName, $installDir, $version, $addToPath)
+
+              # Bounce any running instances so ExpandArchive won't hit
+              # sharing-violations on the exe files.
+              Get-Process sapicli, sapilex -ErrorAction SilentlyContinue |
+                Stop-Process -Force -ErrorAction SilentlyContinue
+
+              if (-not (Test-Path $installDir)) {
+                New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+              }
+
+              $zipPath = Join-Path $remoteTemp $zipName
+              Write-Host "Expanding $zipPath -> $installDir"
+              Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+
+              # Belt & braces cleanup of the temp copy.
+              Remove-Item -Path $remoteTemp -Recurse -Force -ErrorAction SilentlyContinue
+
+              $exe = Join-Path $installDir 'sapicli.exe'
+              if (-not (Test-Path $exe)) { throw "sapicli.exe not found at $exe after extract" }
+
+              if ($addToPath -eq 'true' -or $addToPath -eq $true) {
+                $path = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+                $parts = $path -split ';' | Where-Object { $_ }
+                if ($parts -notcontains $installDir) {
+                  $newPath = ($installDir, $parts) -join ';' -replace ';{2,}', ';'
+                  [Environment]::SetEnvironmentVariable('Path', $newPath, 'Machine')
+                  Write-Host "Added $installDir to system PATH"
+                } else {
+                  Write-Host "$installDir already on system PATH"
+                }
+              }
+
+              # Sanity: SAPI init + voice enumeration. Exit code, not output,
+              # is what we grade -- a runner without SAPI voices returns [].
+              $out = & $exe --list 2>&1
+              if ($LASTEXITCODE -ne 0) { throw "$exe --list failed (exit $LASTEXITCODE): $out" }
+              Write-Host "sapicli $version installed OK at $installDir"
+            }
+          } finally {
+            Remove-PSSession $session
+          }
