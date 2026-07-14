@@ -8,27 +8,39 @@ name: deploy
 #
 # ---- One-time setup ---------------------------------------------------
 #
-# On the Gitea runner (Windows, self-hosted, needs the labels "self-hosted"
-# and "windows"):
+# On each target machine (Windows 10 / 11 or Server 2019+, both ship
+# OpenSSH):
 #
-#   Set-Item WSMan:\localhost\Client\TrustedHosts -Value '*' -Force -Concatenate
+#   Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+#   Start-Service sshd
+#   Set-Service   sshd -StartupType Automatic
+#   New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server (sshd)' `
+#     -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
 #
-#   (Or pin to specific IPs / a subnet if you don't want to trust everything.)
+#   # Public-key file location depends on whether DEPLOY_USER is admin or not:
+#   #   * ADMIN account   -> %ProgramData%\ssh\administrators_authorized_keys
+#   #     (single shared file for all admin users, restrictive ACL required)
+#   #   * NON-ADMIN acct  -> %USERPROFILE%\.ssh\authorized_keys
+#   # Paste the *public* half of the deploy key into one of those.
 #
-# On each target machine:
+#   # If you used administrators_authorized_keys, tighten the ACL sshd insists on:
+#   icacls "$env:ProgramData\ssh\administrators_authorized_keys" /inheritance:r
+#   icacls "$env:ProgramData\ssh\administrators_authorized_keys" /grant "Administrators:F" "SYSTEM:F"
 #
-#   Enable-PSRemoting -SkipNetworkProfileCheck -Force
-#   # If auth as a local account rather than a domain account:
-#   New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
-#     -Name LocalAccountTokenFilterPolicy -PropertyType DWord -Value 1 -Force
-#   Restart-Service WinRM
+# The Gitea runner needs OpenSSH client on PATH (Windows 10 / 11 have it
+# by default). Nothing else.
 #
 # In the Gitea repo -> Settings -> Actions -> Secrets:
 #
-#   DEPLOY_USER      "<COMPUTER>\<user>" for a local account, "<DOMAIN>\<user>"
-#                    for a domain one. This account needs local admin on the
-#                    target so it can write to %ProgramFiles% and PATH.
-#   DEPLOY_PASSWORD  its password.
+#   DEPLOY_USER     "<local user>" or "<DOMAIN\user>". Needs local admin
+#                   on the target so it can write to %ProgramFiles% and
+#                   update the system PATH.
+#   DEPLOY_SSH_KEY  full contents of the *private* key (starts with
+#                   "-----BEGIN OPENSSH PRIVATE KEY-----" and ends with
+#                   "-----END OPENSSH PRIVATE KEY-----"). Generate with:
+#                     ssh-keygen -t ed25519 -f deploy_key -N ""
+#                   then paste deploy_key into DEPLOY_SSH_KEY and
+#                   deploy_key.pub into the target's authorized_keys.
 
 on:
   workflow_dispatch:
@@ -64,8 +76,7 @@ jobs:
     runs-on: [self-hosted, windows]
     steps:
       # ---- Fetch the release zip from GitHub -----------------------------
-      # We ship what CI built, verbatim. Anonymous unauthenticated request;
-      # the releases are public.
+      # Anonymous unauthenticated request; releases are public.
       - name: Download release zip
         id: fetch
         shell: pwsh
@@ -87,86 +98,103 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      # ---- Push to target via PSRemoting --------------------------------
-      # 1. Open a PSSession with cred from secrets.
-      # 2. Stop any running sapicli.exe / sapilex.exe (in case someone left
-      #    one open) so ExpandArchive won't fail on locked files.
-      # 3. Copy the zip to the target's %TEMP%.
-      # 4. Expand into the install dir; overwrite the shipped files, leave any
-      #    user files (e.g. a custom lexemes.pls dropped in there) alone.
-      # 5. Optionally prepend the install dir to the system PATH.
-      # 6. Sanity-check: run `sapicli.exe --list` and require exit 0.
-      - name: Deploy via PSRemoting
+      # ---- Push to target via OpenSSH ----------------------------------
+      # 1. Materialize the private key from the secret into RUNNER_TEMP;
+      #    lock down the ACL so sshd's "key permissions too open" check
+      #    accepts it.
+      # 2. scp the zip to the target's %TEMP%.
+      # 3. ssh a self-contained PowerShell install script to the target
+      #    via -EncodedCommand (avoids all shell / cmd escaping headaches).
+      #    The script stops any running sapicli/sapilex, expands the zip
+      #    into install_dir, optionally updates the system PATH, then
+      #    smoke-tests `sapicli --list`.
+      # 4. Always delete the key file, even on failure.
+      - name: Deploy via ssh + scp
         shell: pwsh
         env:
-          DEPLOY_HOST:     ${{ inputs.target_host }}
-          DEPLOY_USER:     ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
-          INSTALL_DIR:     ${{ inputs.install_dir }}
-          ADD_TO_PATH:     ${{ inputs.add_to_path }}
-          ZIP:             ${{ steps.fetch.outputs.zip }}
-          VERSION:         ${{ steps.fetch.outputs.version }}
+          DEPLOY_HOST:    ${{ inputs.target_host }}
+          DEPLOY_USER:    ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          INSTALL_DIR:    ${{ inputs.install_dir }}
+          ADD_TO_PATH:    ${{ inputs.add_to_path }}
+          ZIP:            ${{ steps.fetch.outputs.zip }}
+          VERSION:        ${{ steps.fetch.outputs.version }}
         run: |
-          if (-not $env:DEPLOY_USER)     { throw 'DEPLOY_USER secret not set' }
-          if (-not $env:DEPLOY_PASSWORD) { throw 'DEPLOY_PASSWORD secret not set' }
+          if (-not $env:DEPLOY_USER)    { throw 'DEPLOY_USER secret not set' }
+          if (-not $env:DEPLOY_SSH_KEY) { throw 'DEPLOY_SSH_KEY secret not set' }
 
-          $sec  = ConvertTo-SecureString $env:DEPLOY_PASSWORD -AsPlainText -Force
-          $cred = New-Object System.Management.Automation.PSCredential($env:DEPLOY_USER, $sec)
+          # Materialize the key. .NET Set-Content default trailing-newline
+          # behaviour breaks some key formats, so use -NoNewline. Restrict
+          # ACL to the current user so ssh doesn't refuse to use the file.
+          $keyFile = Join-Path ($env:RUNNER_TEMP ?? $env:TEMP) "deploy_key"
+          $env:DEPLOY_SSH_KEY | Set-Content -Path $keyFile -NoNewline -Encoding ascii
+          icacls $keyFile /inheritance:r | Out-Null
+          icacls $keyFile /grant "$($env:USERNAME):F" | Out-Null
 
-          $session = New-PSSession -ComputerName $env:DEPLOY_HOST -Credential $cred -ErrorAction Stop
+          # Common ssh/scp options: disable interactive prompts, don't
+          # persist the target's host key (fresh runner has no known_hosts).
+          $sshOpts = @(
+            '-i', $keyFile,
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=NUL',
+            '-o', 'BatchMode=yes'
+          )
+
           try {
-            $remoteTemp = Invoke-Command -Session $session -ScriptBlock {
-              $t = Join-Path $env:TEMP "sapicli-deploy-$([guid]::NewGuid().ToString('N'))"
-              New-Item -ItemType Directory -Path $t -Force | Out-Null
-              $t
-            }
-            Write-Host "Remote temp: $remoteTemp"
+            $remoteZip = "C:/Windows/Temp/$env:ZIP"
+            $target    = "$env:DEPLOY_USER@$env:DEPLOY_HOST"
 
-            Copy-Item -ToSession $session -Path $env:ZIP -Destination $remoteTemp
-            Write-Host "Copied $env:ZIP -> $remoteTemp"
+            Write-Host "scp $env:ZIP -> ${target}:$remoteZip"
+            & scp @sshOpts $env:ZIP "${target}:$remoteZip"
+            if ($LASTEXITCODE -ne 0) { throw "scp failed with exit $LASTEXITCODE" }
 
-            Invoke-Command -Session $session `
-                           -ArgumentList $remoteTemp, $env:ZIP, $env:INSTALL_DIR, $env:VERSION, $env:ADD_TO_PATH `
-                           -ScriptBlock {
-              param($remoteTemp, $zipName, $installDir, $version, $addToPath)
+            # Install script -- parameters flow in via -f substitution so the
+            # here-string body itself doesn't have to interpolate anything.
+            # (No collisions with regex {N,} placeholders here.)
+            $installScript = @'
+$ErrorActionPreference = 'Stop'
+$ZipPath    = '{0}'
+$InstallDir = '{1}'
+$Version    = '{2}'
+$AddToPath  = '{3}' -eq 'true'
 
-              # Bounce any running instances so ExpandArchive won't hit
-              # sharing-violations on the exe files.
-              Get-Process sapicli, sapilex -ErrorAction SilentlyContinue |
-                Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process sapicli, sapilex -ErrorAction SilentlyContinue |
+    Stop-Process -Force -ErrorAction SilentlyContinue
 
-              if (-not (Test-Path $installDir)) {
-                New-Item -ItemType Directory -Path $installDir -Force | Out-Null
-              }
+if (-not (Test-Path $InstallDir)) {
+    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+}
+Expand-Archive -Path $ZipPath -DestinationPath $InstallDir -Force
+Remove-Item -Path $ZipPath -Force -ErrorAction SilentlyContinue
 
-              $zipPath = Join-Path $remoteTemp $zipName
-              Write-Host "Expanding $zipPath -> $installDir"
-              Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+$exe = Join-Path $InstallDir 'sapicli.exe'
+if (-not (Test-Path $exe)) { throw "sapicli.exe not found at $exe after extract" }
 
-              # Belt & braces cleanup of the temp copy.
-              Remove-Item -Path $remoteTemp -Recurse -Force -ErrorAction SilentlyContinue
+if ($AddToPath) {
+    $path  = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $parts = @($path -split ';' | Where-Object { $_ })
+    if ($parts -notcontains $InstallDir) {
+        $newPath = (@($InstallDir) + $parts) -join ';'
+        [Environment]::SetEnvironmentVariable('Path', $newPath, 'Machine')
+        Write-Host "Added $InstallDir to system PATH"
+    } else {
+        Write-Host "$InstallDir already on system PATH"
+    }
+}
 
-              $exe = Join-Path $installDir 'sapicli.exe'
-              if (-not (Test-Path $exe)) { throw "sapicli.exe not found at $exe after extract" }
+$out = & $exe --list 2>&1
+if ($LASTEXITCODE -ne 0) { throw "$exe --list failed (exit $LASTEXITCODE): $out" }
+Write-Host "sapicli $Version installed OK at $InstallDir"
+'@ -f $remoteZip, $env:INSTALL_DIR, $env:VERSION, $env:ADD_TO_PATH
 
-              if ($addToPath -eq 'true' -or $addToPath -eq $true) {
-                $path = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-                $parts = $path -split ';' | Where-Object { $_ }
-                if ($parts -notcontains $installDir) {
-                  $newPath = ($installDir, $parts) -join ';' -replace ';{2,}', ';'
-                  [Environment]::SetEnvironmentVariable('Path', $newPath, 'Machine')
-                  Write-Host "Added $installDir to system PATH"
-                } else {
-                  Write-Host "$installDir already on system PATH"
-                }
-              }
+            # powershell.exe (Windows PowerShell 5) is present on every
+            # target since Windows 7; no need to require pwsh 7 on the
+            # far side. -EncodedCommand expects UTF-16 LE + base64.
+            $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($installScript))
 
-              # Sanity: SAPI init + voice enumeration. Exit code, not output,
-              # is what we grade -- a runner without SAPI voices returns [].
-              $out = & $exe --list 2>&1
-              if ($LASTEXITCODE -ne 0) { throw "$exe --list failed (exit $LASTEXITCODE): $out" }
-              Write-Host "sapicli $version installed OK at $installDir"
-            }
+            Write-Host "ssh $target powershell -EncodedCommand ..."
+            & ssh @sshOpts $target 'powershell' '-NoProfile' '-EncodedCommand' $b64
+            if ($LASTEXITCODE -ne 0) { throw "remote install failed with exit $LASTEXITCODE" }
           } finally {
-            Remove-PSSession $session
+            Remove-Item -Path $keyFile -Force -ErrorAction SilentlyContinue
           }
