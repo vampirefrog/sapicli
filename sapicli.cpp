@@ -344,15 +344,28 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 		return 1;
 	}
 
-	// detect output type by file extension
+	// Autodetect output type by file extension. .wav is SAPI-native (not a
+	// muxaudio codec), so we handle it here; everything else defers to
+	// muxaudio's mux_codec_from_filename table.
 	if(outType == 0) {
-		outType = 1;
+		outType = 1;   // default: raw PCM
 		if(wavFilename && wavFilename[0]) {
 			size_t s = wcslen(wavFilename);
-			if(s >= 4) {
-				if(!_wcsicmp(wavFilename + s - 4, L".wav"))      outType = 2;
-				else if(!_wcsicmp(wavFilename + s - 4, L".ogg")) outType = 3;
-				else if(!_wcsicmp(wavFilename + s - 4, L".mp3")) outType = 5;
+			if(s >= 4 && !_wcsicmp(wavFilename + s - 4, L".wav")) {
+				outType = 2;
+			} else {
+				// mux_codec_from_filename is narrow-char; convert the tail.
+				char narrow[MAX_PATH];
+				int n = WideCharToMultiByte(CP_ACP, 0, wavFilename, -1,
+				                            narrow, sizeof(narrow), NULL, NULL);
+				mux_codec_type c;
+				if(n > 0 && mux_codec_from_filename(narrow, &c) == MUX_OK) {
+					if     (c == MUX_CODEC_VORBIS) outType = 3;
+					else if(c == MUX_CODEC_OPUS)   outType = 4;
+					else if(c == MUX_CODEC_MP3)    outType = 5;
+					// Other codecs (flac / aac / ...) don't have a sapicli
+					// numeric slot yet; fall through to raw.
+				}
 			}
 		}
 	}

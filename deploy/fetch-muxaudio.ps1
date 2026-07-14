@@ -21,7 +21,7 @@
   muxaudio-windows-{x86,x64}-shared.zip release asset.
 
 .PARAMETER Version
-  muxaudio release tag to fetch (default: v0.3).
+  muxaudio release tag to fetch (default: v0.4).
 
 .PARAMETER Destination
   Directory to stage into. Layout above.
@@ -33,7 +33,7 @@
 param(
   [ValidateSet('Win32', 'x64')]
   [string] $Platform = 'Win32',
-  [string] $Version  = 'v0.3',
+  [string] $Version  = 'v0.4',
   [string] $Destination = (Join-Path $PSScriptRoot '..\third_party\muxaudio'),
   [switch] $Force
 )
