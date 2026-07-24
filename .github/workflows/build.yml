@@ -37,6 +37,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0   # release job needs tag annotations
+          submodules: recursive   # extern/muxaudio (built by the pre-build step)
 
       # vcvarsall.bat wrapper: sets INCLUDE / LIB / PATH for the target arch
       # and puts msbuild + cl on PATH for subsequent steps. Doing this via a
@@ -46,6 +47,19 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.arch.vcvars }}
+
+      # muxaudio is built from the extern/muxaudio submodule via vcpkg (see the
+      # msbuild step). Cache vcpkg's binary archives so the codec deps
+      # (ogg/vorbis/opus/flac/mpg123/mp3lame/fdk-aac) are compiled once and
+      # reused across runs instead of rebuilt from source every push. Keyed on
+      # the manifest + baseline; falls back to the newest per-arch cache.
+      - name: cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-${{ matrix.arch.name }}-${{ hashFiles('extern/muxaudio/vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ matrix.arch.name }}-
 
       # ---- version derivation -------------------------------------------
       # Tag `vX(.Y(.Z(.W)))` -> X.Y.Z.W (up to 4 parts). Non-tag builds get
@@ -59,9 +73,10 @@ jobs:
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       # ---- build -----------------------------------------------------------
-      # muxaudio comes from the upstream v0.3 release. sapicli.vcxproj's
-      # pre-build target runs deploy\fetch-muxaudio.ps1 -Platform $(Platform),
-      # which downloads and stages the right (x86|x64) archive automatically.
+      # muxaudio is built from the pinned extern/muxaudio submodule. The
+      # vcxproj pre-build target runs deploy\build-muxaudio.ps1 -Platform
+      # $(Platform), which CMake-builds it (via vcpkg for the codec deps) and
+      # stages the right (x86|x64) lib + DLLs automatically.
       - name: msbuild Release|${{ matrix.arch.platform }}
         shell: cmd
         run: msbuild sapicli.sln -p:Configuration=Release -p:Platform=${{ matrix.arch.platform }} -nologo -m -v:minimal
