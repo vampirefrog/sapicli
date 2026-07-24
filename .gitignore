@@ -10,3 +10,4 @@ vcpkg_installed/
 .build.log.err
 dist/
 third_party/
+build/

@@ -65,10 +65,11 @@
       <AdditionalDependencies>muxaudio.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
-      <!-- Idempotent: exits fast if the platform's third_party bin/lib is    -->
-      <!-- already populated. Fetches the right x86 / x64 zip per Platform.   -->
-      <Command>pwsh -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)deploy\fetch-muxaudio.ps1" -Platform $(Platform) -Destination "$(SolutionDir)third_party\muxaudio"</Command>
-      <Message>Ensuring muxaudio release is staged for $(Platform)</Message>
+      <!-- Build muxaudio from the pinned extern/muxaudio submodule and stage   -->
+      <!-- it into third_party\muxaudio\<Platform>\{lib,bin}. Idempotent: skips  -->
+      <!-- the build when the submodule HEAD hasn't moved (stamp file).          -->
+      <Command>pwsh -NoProfile -ExecutionPolicy Bypass -File "$(SolutionDir)deploy\build-muxaudio.ps1" -Platform $(Platform) -Destination "$(SolutionDir)third_party\muxaudio"</Command>
+      <Message>Building muxaudio submodule for $(Platform)</Message>
     </PreBuildEvent>
     <PostBuildEvent>
       <!-- Sweep every DLL from the platform's third_party bin next to      -->

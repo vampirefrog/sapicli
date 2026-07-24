@@ -1,0 +1,3 @@
+[submodule "extern/muxaudio"]
+	path = extern/muxaudio
+	url = https://github.com/vampirefrog/muxaudio.git
