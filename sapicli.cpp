@@ -442,11 +442,25 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 			return 1;
 		}
 
-		bool encodes_events = multiplex && outType != 1;
+		// Multiplex events into the output whenever asked — including raw PCM,
+		// which muxaudio's PCM codec leb128-frames just like MP3.
+		bool encodes_events = multiplex;
 		HANDLE eh = NULL;
 		if(ullEventInterest && !encodes_events) {
 			if(isStdout) {
-				eh = (HANDLE)_get_osfhandle(3);
+				// _get_osfhandle fast-fails (STATUS_STACK_BUFFER_OVERRUN, exit
+				// 0xC0000409) through the CRT invalid-parameter handler if fd 3
+				// isn't open. Suppress it so a missing fd 3 is a clean error, not
+				// a crash.
+				_invalid_parameter_handler prev = _set_thread_local_invalid_parameter_handler(
+					[](const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t) {});
+				intptr_t fh = _get_osfhandle(3);
+				_set_thread_local_invalid_parameter_handler(prev);
+				if(fh == -1 || fh == -2) {
+					fwprintf(stderr, L"Events were requested on stdout but no file descriptor 3 is open to receive them. Use --multiplex, or an output type that carries events.\n");
+					return 1;
+				}
+				eh = (HANDLE)fh;
 			} else {
 				fwprintf(stderr, L"Cannot select events (0x%04llx) when output is not stdout and multiplexing is not enabled\n", ullEventInterest);
 				if(!isStdout) CloseHandle(h);
@@ -459,8 +473,8 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 			enc(nullptr, mux_encoder_destroy);
 
 		SynthSink::ByteSink audio_sink;
-		if(outType == 1) {
-			// raw PCM: audio bytes go straight to the handle.
+		if(outType == 1 && !multiplex) {
+			// raw PCM, no multiplex: audio bytes go straight to the handle.
 			audio_sink = [h](const void* data, std::size_t len) {
 				DWORD written;
 				WriteFile(h, data, (DWORD)len, &written, NULL);
