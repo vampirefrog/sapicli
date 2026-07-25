@@ -334,7 +334,9 @@ int listCodecs() {
 	return 0;
 }
 
-int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, int rate, int volume, DWORD speakFlags, DWORD samplesPerSec, WORD bitsPerSample, WORD nChannels, ULONGLONG ullEventInterest, BOOL multiplex, const std::vector<std::wstring>& codecParams) {
+// outType: 0=auto (from filename), 1=raw PCM, 2=wav (SAPI RIFF), 3=muxaudio
+// codec (given by outCodec). Any muxaudio codec can be produced via type 3.
+int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, int rate, int volume, DWORD speakFlags, DWORD samplesPerSec, WORD bitsPerSample, WORD nChannels, ULONGLONG ullEventInterest, BOOL multiplex, mux_codec_type outCodec, const std::vector<std::wstring>& codecParams) {
 	if(SP_IS_BAD_STRING_PTR(wavFilename)) {
 		fwprintf(stderr, L"Invalid filename\n");
 		return 1;
@@ -354,17 +356,15 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 			if(s >= 4 && !_wcsicmp(wavFilename + s - 4, L".wav")) {
 				outType = 2;
 			} else {
-				// mux_codec_from_filename is narrow-char; convert the tail.
+				// mux_codec_from_filename is narrow-char; convert the tail. Any
+				// non-PCM codec becomes a type-3 muxaudio output.
 				char narrow[MAX_PATH];
 				int n = WideCharToMultiByte(CP_ACP, 0, wavFilename, -1,
 				                            narrow, sizeof(narrow), NULL, NULL);
 				mux_codec_type c;
-				if(n > 0 && mux_codec_from_filename(narrow, &c) == MUX_OK) {
-					if     (c == MUX_CODEC_VORBIS) outType = 3;
-					else if(c == MUX_CODEC_OPUS)   outType = 4;
-					else if(c == MUX_CODEC_MP3)    outType = 5;
-					// Other codecs (flac / aac / ...) don't have a sapicli
-					// numeric slot yet; fall through to raw.
+				if(n > 0 && mux_codec_from_filename(narrow, &c) == MUX_OK && c != MUX_CODEC_PCM) {
+					outType = 3;
+					outCodec = c;
 				}
 			}
 		}
@@ -372,15 +372,12 @@ int speakToWav(WCHAR *text, WCHAR *voiceId, WCHAR *wavFilename, DWORD outType, i
 
 	bool isStdout = wavFilename && wavFilename[0] == L'-' && wavFilename[1] == 0;
 
-	// Resolve outType → mux codec (except 1=raw and 2=wav which bypass muxaudio).
-	mux_codec_type codec = MUX_CODEC_PCM;
-	if(outType == 3)      codec = MUX_CODEC_VORBIS;
-	else if(outType == 4) codec = MUX_CODEC_OPUS;
-	else if(outType == 5) codec = MUX_CODEC_MP3;
+	// raw (1) and wav (2) bypass the muxaudio codec; type 3 uses outCodec.
+	mux_codec_type codec = (outType == 3) ? outCodec : MUX_CODEC_PCM;
 
-	// For encoded outputs, refuse a sample rate the codec doesn't accept
-	// instead of silently rewriting it — makes voice/rate mismatches loud.
-	if(outType >= 3 && outType <= 5) {
+	// For encoded muxaudio outputs, refuse a sample rate the codec doesn't
+	// accept instead of silently rewriting it — makes mismatches loud.
+	if(outType == 3 && codec != MUX_CODEC_PCM) {
 		if(mux_sample_rate_supported(codec, (int)samplesPerSec) != MUX_OK) {
 			fwprintf(stderr, L"Sample rate %lu Hz is not supported by codec '%hs'. "
 			                 L"See --list-codecs for accepted rates.\n",
@@ -625,6 +622,7 @@ int wmain(int argc, WCHAR *argv[]) {
 	WORD bitsPerSample = 16, nChannels = 1;
 	ULONGLONG ullEventInterest = 0;
 	DWORD outType = 0;
+	WCHAR *outTypeStr = 0;
 	BOOL multiplex = FALSE;
 	std::vector<std::wstring> codecParams;
 
@@ -655,20 +653,8 @@ int wmain(int argc, WCHAR *argv[]) {
 				wavFilename = optarg;
 				break;
 			case L'T':
-				if(!_wcsicmp(optarg, L"auto"))
-					outType = 0;
-				else if(!_wcsicmp(optarg, L"raw"))
-					outType = 1;
-				else if(!_wcsicmp(optarg, L"wav"))
-					outType = 2;
-				else if(!_wcsicmp(optarg, L"ogg") || !_wcsicmp(optarg, L"ogg+vorbis"))
-					outType = 3;
-				else if(!_wcsicmp(optarg, L"ogg+opus"))
-					outType = 4;
-				else if(!_wcsicmp(optarg, L"mp3"))
-					outType = 5;
-				else
-					help = 1;
+				// Resolved after the option loop (auto needs the output filename).
+				outTypeStr = optarg;
 				break;
 			case L'v':
 				voice = optarg;
@@ -730,9 +716,10 @@ int wmain(int argc, WCHAR *argv[]) {
 			L"                                  `wav' for RIFF .wav\n"
 			L"                                  `ogg' or `ogg+vorbis' for Ogg Vorbis\n"
 			L"                                  `ogg+opus' for Ogg Opus\n"
-			L"                                  `mp3' for MP3\n"
 			L"                                  `raw' for raw PCM samples\n"
 			L"                                  `auto' to autodetect from file extension\n"
+			L"                                  or any muxaudio codec name (mp3, flac,\n"
+			L"                                  aac, alaw, ...); see --list-codecs.\n"
 			L"  -v, --voice=VOICE               Select voice.\n"
 			L"  -r, --rate=RATE                 Rate (speed) of speech, from -10 to 10.\n"
 			L"  -t, --type=TYPE                 Input text type (PLAIN,SSML,SAPI,AUTO).\n"
@@ -779,7 +766,33 @@ int wmain(int argc, WCHAR *argv[]) {
 	} else if(listCodecsFlag) {
 		ret = listCodecs();
 	} else {
-		ret = speakToWav(argv[optind], voice, wavFilename, outType, rate, volume, speakFlags, samplesPerSec, bitsPerSample, nChannels, ullEventInterest, multiplex, codecParams);
+		// Resolve --out-type. wav/raw are special (not muxaudio codecs); ogg and
+		// ogg+opus are friendly aliases; anything else is looked up as a muxaudio
+		// codec name, so any built-in codec (flac, aac, alaw, ...) can be output.
+		mux_codec_type outCodec = MUX_CODEC_PCM;
+		if(!outTypeStr || !_wcsicmp(outTypeStr, L"auto")) {
+			outType = 0;
+		} else if(!_wcsicmp(outTypeStr, L"raw") || !_wcsicmp(outTypeStr, L"pcm")) {
+			outType = 1;
+		} else if(!_wcsicmp(outTypeStr, L"wav")) {
+			outType = 2;
+		} else if(!_wcsicmp(outTypeStr, L"ogg") || !_wcsicmp(outTypeStr, L"ogg+vorbis")) {
+			outType = 3; outCodec = MUX_CODEC_VORBIS;
+		} else if(!_wcsicmp(outTypeStr, L"ogg+opus")) {
+			outType = 3; outCodec = MUX_CODEC_OPUS;
+		} else {
+			char narrow[64];
+			int n = WideCharToMultiByte(CP_UTF8, 0, outTypeStr, -1, narrow, sizeof(narrow), NULL, NULL);
+			if(n > 0 && mux_codec_from_name(narrow, &outCodec) == MUX_OK) {
+				outType = 3;
+			} else {
+				fwprintf(stderr, L"Unknown output type '%s'. Use auto, wav, raw, ogg, "
+				                 L"ogg+opus, or a codec name from --list-codecs.\n", outTypeStr);
+				ret = 1;
+			}
+		}
+		if(ret == 0)
+			ret = speakToWav(argv[optind], voice, wavFilename, outType, rate, volume, speakFlags, samplesPerSec, bitsPerSample, nChannels, ullEventInterest, multiplex, outCodec, codecParams);
 	}
 
 	::CoUninitialize();
