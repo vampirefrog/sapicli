@@ -91,7 +91,7 @@ Write-Host "Building muxaudio $head ($Platform, $triplet) ..."
 & cmake -S $srcDir -B $buildDir -G 'Visual Studio 17 2022' -A $arch `
   "-DCMAKE_TOOLCHAIN_FILE=$toolchain" "-DVCPKG_TARGET_TRIPLET=$triplet" `
   -DBUILD_SHARED=ON -DBUILD_STATIC_FULL=OFF -DBUILD_TESTS=OFF -DBUILD_TOOLS=OFF `
-  -DCODEC_VORBIS=ON -DCODEC_OPUS=ON -DCODEC_MP3=ON -DCODEC_FLAC=ON
+  -DCODEC_VORBIS=ON -DCODEC_OPUS=ON -DCODEC_MP3=ON -DCODEC_FLAC=ON -DCODEC_AAC=ON
 if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)" }
 
 & cmake --build $buildDir --config $Configuration
